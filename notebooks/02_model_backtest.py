@@ -2,11 +2,10 @@ import os
 import sys
 
 PROJECT_ROOT = os.path.abspath('..')
-SRC_ROOT = os.path.join(PROJECT_ROOT, 'src')
-if SRC_ROOT not in sys.path:
-    sys.path.insert(0, SRC_ROOT)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
-from api import (  # noqa: E402
+from src.api import (  # noqa: E402
     BacktestConfig,
     CurvePriorsConfig,
     DataConfig,
@@ -35,27 +34,31 @@ config = BacktestConfig(
         recency_quantile=0.30,
         frequency_quantile=0.70,
         monetary_click_share_cutoff=0.80,
-        use_semantic_clustering=False,
+        use_semantic_clustering=True,
+        semantic_apply_to_segments=('head', 'long_tail'),
+        min_keywords_per_cluster=2,
     ),
     semantic=SemanticClusteringConfig(
-        min_cluster_size=5,
-        min_samples=2,
+        min_cluster_size=2,
+        min_samples=1,
+        embedding_batch_size=8,
+        umap_n_components=3,
     ),
     training=TrainingConfig(
         inference_method='advi',
-        advi_steps=4000,
+        advi_steps=5000,
         posterior_draws=300,
         random_seed=42,
     ),
-    curves=('log', 'hill'),
-    likelihoods=('gaussian', 'nb', 'zinb'),
+    curves=('log',),
+    likelihoods=('gaussian',),
     curve_priors=CurvePriorsConfig(
         use_data_driven_alpha_center=True,
     ),
     distribution_priors=DistributionPriorsConfig(),
 )
 
-raw_df = load_keyword_data('../data/source/keyword.csv', config.data)
+raw_df = load_keyword_data('data/source/keyword.csv', config.data)
 result = run_backtest_suite(raw_df=raw_df, config=config)
-save_backtest_suite(result, '../outputs/backtest/run_001')
+save_backtest_suite(result, 'outputs/backtest/run_001')
 print(result['summary'].head())
