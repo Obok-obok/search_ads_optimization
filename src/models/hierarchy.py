@@ -62,8 +62,23 @@ def build_hierarchy_inputs(
         if len(valid_clusters) > 0:
             cluster_values = sorted(valid_clusters['cluster_id'].unique().tolist())
             cluster_to_idx = {cluster_id: idx for idx, cluster_id in enumerate(cluster_values)}
-            train_out = train_out.merge(valid_clusters, on='keyword', how='left')
-            test_out = test_out.merge(valid_clusters, on='keyword', how='left')
+
+            # Avoid duplicate cluster_id columns when upstream frames already include
+            # semantic cluster annotations from segment preparation.
+            if 'cluster_id' not in train_out.columns:
+                train_out = train_out.merge(valid_clusters, on='keyword', how='left')
+            else:
+                train_out['cluster_id'] = train_out['cluster_id'].fillna(
+                    train_out['keyword'].map(valid_clusters.drop_duplicates('keyword').set_index('keyword')['cluster_id'])
+                )
+
+            if 'cluster_id' not in test_out.columns:
+                test_out = test_out.merge(valid_clusters, on='keyword', how='left')
+            else:
+                test_out['cluster_id'] = test_out['cluster_id'].fillna(
+                    test_out['keyword'].map(valid_clusters.drop_duplicates('keyword').set_index('keyword')['cluster_id'])
+                )
+
             train_out['cluster_idx'] = train_out['cluster_id'].map(cluster_to_idx).astype(float)
             test_out['cluster_idx'] = test_out['cluster_id'].map(cluster_to_idx).astype(float)
             cluster_idx_train = train_out['cluster_idx'].to_numpy(dtype=float)
