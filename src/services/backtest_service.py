@@ -16,7 +16,7 @@ def _ensure_cluster_id(df, segment_table, keyword_col="keyword", noise_label=-1)
 
 def run_backtest_suite(raw_df, config):
     from src.data.aggregators import aggregate_data
-    from src.data.splitter import split_train_test
+    from src.data.splitters import split_train_test
     from src.segmentation.pipeline import build_segment_table
     from src.models.hierarchy import build_hierarchy_inputs
 
