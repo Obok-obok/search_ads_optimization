@@ -17,11 +17,7 @@ from ..segmentation.pipeline import build_segment_table
 
 
 REQUIRED_AGG_COLUMNS = {'period_start', 'keyword', 'spend', 'click'}
-_CLUSTER_DEFAULTS = {
-    'cluster_id': -1,
-    'cluster_size': 0,
-    'is_clustered': False,
-}
+CLUSTER_COLUMNS = ['cluster_id', 'cluster_size', 'is_clustered']
 
 
 def _validate_aggregated_frame(df: pd.DataFrame, frame_name: str) -> None:
@@ -34,21 +30,38 @@ def _validate_aggregated_frame(df: pd.DataFrame, frame_name: str) -> None:
         raise ValueError(f'{frame_name} contains negative spend or click values.')
 
 
-def _ensure_cluster_columns(df: pd.DataFrame, segment_table: pd.DataFrame | None = None) -> pd.DataFrame:
+
+
+def _ensure_cluster_columns(
+    df: pd.DataFrame,
+    segment_table: pd.DataFrame | None = None,
+    keyword_col: str = 'keyword',
+    noise_label: int = -1,
+) -> pd.DataFrame:
     out = df.copy()
-    keyword_col = 'keyword'
+    defaults = {
+        'cluster_id': int(noise_label),
+        'cluster_size': 0,
+        'is_clustered': False,
+    }
 
-    for col, default in _CLUSTER_DEFAULTS.items():
+    if segment_table is not None and keyword_col in out.columns and keyword_col in segment_table.columns:
+        merge_cols = [keyword_col] + [col for col in CLUSTER_COLUMNS if col in segment_table.columns]
+        if len(merge_cols) > 1:
+            cluster_lookup = segment_table[merge_cols].drop_duplicates(subset=[keyword_col])
+            missing_cols = [col for col in CLUSTER_COLUMNS if col not in out.columns]
+            if missing_cols:
+                out = out.merge(cluster_lookup, on=keyword_col, how='left')
+
+    for col, default_value in defaults.items():
         if col not in out.columns:
-            if segment_table is not None and keyword_col in out.columns and keyword_col in segment_table.columns and col in segment_table.columns:
-                lookup = segment_table[[keyword_col, col]].drop_duplicates(subset=[keyword_col])
-                out = out.merge(lookup, on=keyword_col, how='left')
-            else:
-                out[col] = default
+            out[col] = default_value
+        else:
+            out[col] = out[col].fillna(default_value)
 
-    out['cluster_id'] = out['cluster_id'].fillna(_CLUSTER_DEFAULTS['cluster_id']).astype(int)
-    out['cluster_size'] = out['cluster_size'].fillna(_CLUSTER_DEFAULTS['cluster_size']).astype(int)
-    out['is_clustered'] = out['is_clustered'].where(out['is_clustered'].notna(), _CLUSTER_DEFAULTS['is_clustered']).astype(bool)
+    out['cluster_id'] = out['cluster_id'].astype(int)
+    out['cluster_size'] = out['cluster_size'].astype(int)
+    out['is_clustered'] = out['is_clustered'].astype(bool)
     return out
 
 
@@ -58,14 +71,12 @@ def _prepare_segment_frames(
     segment_table: pd.DataFrame,
     segment_name: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    segment_cols = ['keyword', 'segment', 'cluster_id', 'cluster_size', 'is_clustered']
-    segment_lookup = _ensure_cluster_columns(segment_table)[segment_cols].drop_duplicates(subset=['keyword'])
-    train_seg = _ensure_cluster_columns(train_df, segment_lookup)
-    test_seg = _ensure_cluster_columns(test_df, segment_lookup)
-    if 'segment' not in train_seg.columns:
-        train_seg = train_seg.merge(segment_lookup[['keyword', 'segment']].drop_duplicates(subset=['keyword']), on='keyword', how='left')
-    if 'segment' not in test_seg.columns:
-        test_seg = test_seg.merge(segment_lookup[['keyword', 'segment']].drop_duplicates(subset=['keyword']), on='keyword', how='left')
+    segment_cols = ['keyword', 'segment', *CLUSTER_COLUMNS]
+    segment_lookup = segment_table[segment_cols].copy()
+    train_seg = train_df.merge(segment_lookup, on='keyword', how='left')
+    test_seg = test_df.merge(segment_lookup, on='keyword', how='left')
+    train_seg = _ensure_cluster_columns(train_seg, segment_table)
+    test_seg = _ensure_cluster_columns(test_seg, segment_table)
     train_seg = train_seg.loc[train_seg['segment'] == segment_name].copy()
     test_seg = test_seg.loc[test_seg['segment'] == segment_name].copy()
     return train_seg, test_seg
@@ -81,10 +92,6 @@ def _run_single_model(
 ) -> tuple[pd.DataFrame, dict, dict]:
     curve = get_curve(curve_name)
     dist = get_distribution(likelihood_name)
-
-    train_df = _ensure_cluster_columns(train_df, segment_table)
-    test_df = _ensure_cluster_columns(test_df, segment_table)
-    segment_table = _ensure_cluster_columns(segment_table)
 
     train_df, test_df, hierarchy = build_hierarchy_inputs(
         train_df=train_df,
@@ -130,7 +137,7 @@ def _run_single_model(
         hierarchy_config=config.hierarchy,
     )
 
-    pred_df = _ensure_cluster_columns(test_df, segment_table)
+    pred_df = _ensure_cluster_columns(test_df, segment_table, noise_label=config.semantic.cluster_noise_label).copy()
     pred_df['pred_click'] = y_pred
     pred_df['spend_scale'] = spend_scale
     pred_df['prediction_level'] = prediction_levels
@@ -154,10 +161,11 @@ def _build_segmentation_diagnostics(segment_table: pd.DataFrame) -> pd.DataFrame
     total_keywords = max(int(segment_table['keyword'].nunique()), 1)
     total_clicks = max(float(segment_table['monetary'].sum()), 1.0)
     for seg_name, seg_df in segment_table.groupby('segment', dropna=False):
+        n_keywords = int(seg_df['keyword'].nunique())
         rows.append({
             'segment': seg_name,
-            'n_keywords': int(seg_df['keyword'].nunique()),
-            'keyword_share': int(seg_df['keyword'].nunique()) / total_keywords,
+            'n_keywords': n_keywords,
+            'keyword_share': n_keywords / total_keywords,
             'click_share': float(seg_df['monetary'].sum()) / total_clicks,
             'mean_recency': float(seg_df['recency'].mean()),
             'mean_frequency': float(seg_df['frequency'].mean()),
@@ -169,7 +177,7 @@ def _build_segmentation_diagnostics(segment_table: pd.DataFrame) -> pd.DataFrame
 
 
 def _build_cluster_diagnostics(segment_table: pd.DataFrame, noise_label: int) -> pd.DataFrame:
-    segment_table = _ensure_cluster_columns(segment_table)
+    segment_table = _ensure_cluster_columns(segment_table, noise_label=noise_label)
     clustered = segment_table.loc[segment_table['cluster_id'] != noise_label].copy()
     if len(clustered) == 0:
         return pd.DataFrame([{
@@ -199,7 +207,8 @@ def run_backtest_suite(raw_df: pd.DataFrame, config: BacktestConfig) -> dict:
     _validate_aggregated_frame(train_df, 'train_df')
     _validate_aggregated_frame(test_df, 'test_df')
 
-    segment_table = _ensure_cluster_columns(build_segment_table(train_df, config))
+    segment_table = build_segment_table(train_df, config)
+    segment_table = _ensure_cluster_columns(segment_table, noise_label=config.semantic.cluster_noise_label)
     semantic_diags = segment_table.attrs.get('semantic_diagnostics', pd.DataFrame())
     diagnostics = {
         'segmentation': _build_segmentation_diagnostics(segment_table),
@@ -218,7 +227,10 @@ def run_backtest_suite(raw_df: pd.DataFrame, config: BacktestConfig) -> dict:
         if len(train_seg) == 0 or len(test_seg) == 0:
             continue
 
-        segment_mapping = _ensure_cluster_columns(segment_table.loc[segment_table['segment'] == segment_name].copy())
+        segment_mapping = _ensure_cluster_columns(
+            segment_table.loc[segment_table['segment'] == segment_name].copy(),
+            noise_label=config.semantic.cluster_noise_label,
+        )
 
         for curve_name in config.curves:
             for likelihood_name in config.likelihoods:
@@ -231,7 +243,6 @@ def run_backtest_suite(raw_df: pd.DataFrame, config: BacktestConfig) -> dict:
                     likelihood_name=likelihood_name,
                     config=config,
                 )
-                pred_df = _ensure_cluster_columns(pred_df, segment_mapping)
                 pred_df['segment'] = segment_name
                 pred_df['run_name'] = run_name
                 summary_rows.append({
@@ -258,7 +269,6 @@ def run_backtest_suite(raw_df: pd.DataFrame, config: BacktestConfig) -> dict:
         'predictions': predictions,
         'metrics': metrics_map,
         'segments': segment_table,
-        'segment_table': segment_table,
         'train_aggregated': train_df,
         'test_aggregated': test_df,
         'diagnostics': diagnostics,
