@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "search-ads-optimization-local"
+version = "0.2.0"
+description = "Local modular search ads optimization project"
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+include = ["src*"]
