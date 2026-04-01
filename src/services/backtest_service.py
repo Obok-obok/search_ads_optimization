@@ -55,6 +55,7 @@ def normalize_cluster_columns(
         return None
 
     out = df.copy()
+    out.attrs = {}
     merge_cols = [keyword_col, 'cluster_id', 'cluster_size', 'is_clustered']
     defaults = {
         'cluster_id': int(noise_label),
@@ -63,7 +64,8 @@ def normalize_cluster_columns(
     }
 
     if segment_table is not None and keyword_col in out.columns and keyword_col in segment_table.columns:
-        lookup = segment_table[[c for c in merge_cols if c in segment_table.columns]].drop_duplicates(subset=[keyword_col])
+        lookup = segment_table[[c for c in merge_cols if c in segment_table.columns]].drop_duplicates(subset=[keyword_col]).copy()
+        lookup.attrs = {}
         if len(lookup) > 0:
             if any(col not in out.columns for col in lookup.columns if col != keyword_col):
                 out = out.merge(lookup, on=keyword_col, how='left', suffixes=('', '_seg'))
