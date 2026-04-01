@@ -138,6 +138,7 @@ def _run_single_model(
         segment_table=segment_table,
         use_semantic_clustering=config.segmentation.use_semantic_clustering,
         noise_label=config.semantic.cluster_noise_label,
+        hierarchy_config=config.hierarchy,
     )
 
     x_train = train_df['spend'].to_numpy(dtype=np.float32)
@@ -160,6 +161,7 @@ def _run_single_model(
         cluster_idx=hierarchy_inputs.train_cluster_idx,
         n_clusters=hierarchy_inputs.n_clusters,
         keyword_idx_to_cluster_idx=hierarchy_inputs.keyword_idx_to_cluster_idx,
+        keyword_prior_scale=hierarchy_inputs.keyword_prior_scale,
     )
     trace = fit_model(built.model, training_config=config.training)
     posterior_means = extract_posterior_means(trace)
@@ -187,6 +189,7 @@ def _run_single_model(
     else:
         pred_df['test_cluster_idx'] = np.nan
     pred_df['test_keyword_train_count'] = hierarchy_inputs.test_keyword_train_count
+    pred_df['min_train_rows_for_keyword_prediction'] = int(config.hierarchy.min_train_rows_for_keyword_prediction)
 
     metrics = evaluate_predictions(test_df['click'].to_numpy(), pred_df['predicted'].to_numpy())
     hierarchy_diag = {

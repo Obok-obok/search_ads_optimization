@@ -83,6 +83,7 @@ class HierarchyConfig:
 
     keyword_pooling_strength: float = 1.0
     long_tail_pooling_multiplier: float = 1.0
+    min_train_rows_for_keyword_prediction: int = 3
     use_cluster_surrogate_for_unseen: bool = True
     use_global_surrogate_for_unseen: bool = True
 
@@ -107,6 +108,31 @@ class CurvePriorsConfig:
     sigma_log_alpha_cluster_scale: float = 1.0
     sigma_log_beta_cluster_scale: float = 0.8
     sigma_log_gamma_cluster_scale: float = 0.8
+
+    sigma_log_alpha_global_to_cluster_scale: float | None = None
+    sigma_log_beta_global_to_cluster_scale: float | None = None
+    sigma_log_gamma_global_to_cluster_scale: float | None = None
+    sigma_log_alpha_keyword_scale: float | None = None
+    sigma_log_beta_keyword_scale: float | None = None
+    sigma_log_gamma_keyword_scale: float | None = None
+
+    def alpha_global_to_cluster_scale(self) -> float:
+        return float(self.sigma_log_alpha_global_to_cluster_scale or self.sigma_log_alpha_scale)
+
+    def beta_global_to_cluster_scale(self) -> float:
+        return float(self.sigma_log_beta_global_to_cluster_scale or self.sigma_log_beta_scale)
+
+    def gamma_global_to_cluster_scale(self) -> float:
+        return float(self.sigma_log_gamma_global_to_cluster_scale or self.sigma_log_gamma_scale)
+
+    def alpha_keyword_scale(self) -> float:
+        return float(self.sigma_log_alpha_keyword_scale or self.sigma_log_alpha_cluster_scale)
+
+    def beta_keyword_scale(self) -> float:
+        return float(self.sigma_log_beta_keyword_scale or self.sigma_log_beta_cluster_scale)
+
+    def gamma_keyword_scale(self) -> float:
+        return float(self.sigma_log_gamma_keyword_scale or self.sigma_log_gamma_cluster_scale)
 
 
 @dataclass(slots=True)

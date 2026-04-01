@@ -21,6 +21,7 @@ class HillCurve(BaseCurve):
         cluster_idx: np.ndarray | None = None,
         n_clusters: int = 0,
         keyword_idx_to_cluster_idx: np.ndarray | None = None,
+        keyword_prior_scale: np.ndarray | None = None,
     ):
         priors = config.curve_priors
         alpha_center = (
@@ -42,14 +43,19 @@ class HillCurve(BaseCurve):
             and np.any(keyword_idx_to_cluster_idx >= 0)
         )
 
-        if has_valid_cluster:
-            log_alpha_cluster = pm.Normal('log_alpha_cluster', mu=mu_log_alpha_global, sigma=sigma_log_alpha_global, shape=n_clusters)
-            log_beta_cluster = pm.Normal('log_beta_cluster', mu=mu_log_beta_global, sigma=sigma_log_beta_global, shape=n_clusters)
-            log_gamma_cluster = pm.Normal('log_gamma_cluster', mu=mu_log_gamma_global, sigma=sigma_log_gamma_global, shape=n_clusters)
+        keyword_prior_scale = np.ones(n_keywords, dtype=float) if keyword_prior_scale is None else np.asarray(keyword_prior_scale, dtype=float)
+        alpha_keyword_sigma = priors.alpha_keyword_scale() * keyword_prior_scale
+        beta_keyword_sigma = priors.beta_keyword_scale() * keyword_prior_scale
+        gamma_keyword_sigma = priors.gamma_keyword_scale() * keyword_prior_scale
 
-            sigma_log_alpha_keyword = pm.HalfNormal('sigma_log_alpha_keyword', sigma=priors.sigma_log_alpha_cluster_scale)
-            sigma_log_beta_keyword = pm.HalfNormal('sigma_log_beta_keyword', sigma=priors.sigma_log_beta_cluster_scale)
-            sigma_log_gamma_keyword = pm.HalfNormal('sigma_log_gamma_keyword', sigma=priors.sigma_log_gamma_cluster_scale)
+        if has_valid_cluster:
+            sigma_log_alpha_cluster = pm.HalfNormal('sigma_log_alpha_cluster', sigma=priors.alpha_global_to_cluster_scale())
+            sigma_log_beta_cluster = pm.HalfNormal('sigma_log_beta_cluster', sigma=priors.beta_global_to_cluster_scale())
+            sigma_log_gamma_cluster = pm.HalfNormal('sigma_log_gamma_cluster', sigma=priors.gamma_global_to_cluster_scale())
+
+            log_alpha_cluster = pm.Normal('log_alpha_cluster', mu=mu_log_alpha_global, sigma=sigma_log_alpha_cluster, shape=n_clusters)
+            log_beta_cluster = pm.Normal('log_beta_cluster', mu=mu_log_beta_global, sigma=sigma_log_beta_cluster, shape=n_clusters)
+            log_gamma_cluster = pm.Normal('log_gamma_cluster', mu=mu_log_gamma_global, sigma=sigma_log_gamma_cluster, shape=n_clusters)
 
             safe_cluster_idx = np.where(keyword_idx_to_cluster_idx >= 0, keyword_idx_to_cluster_idx, 0).astype(int)
             valid_cluster_mask = (keyword_idx_to_cluster_idx >= 0)
@@ -62,17 +68,17 @@ class HillCurve(BaseCurve):
             parent_beta = pm.math.switch(valid_cluster_mask, parent_beta_cluster, mu_log_beta_global)
             parent_gamma = pm.math.switch(valid_cluster_mask, parent_gamma_cluster, mu_log_gamma_global)
 
-            log_alpha_k = pm.Normal('log_alpha_k', mu=parent_alpha, sigma=sigma_log_alpha_keyword, shape=n_keywords)
-            log_beta_k = pm.Normal('log_beta_k', mu=parent_beta, sigma=sigma_log_beta_keyword, shape=n_keywords)
-            log_gamma_k = pm.Normal('log_gamma_k', mu=parent_gamma, sigma=sigma_log_gamma_keyword, shape=n_keywords)
+            log_alpha_k = pm.Normal('log_alpha_k', mu=parent_alpha, sigma=alpha_keyword_sigma, shape=n_keywords)
+            log_beta_k = pm.Normal('log_beta_k', mu=parent_beta, sigma=beta_keyword_sigma, shape=n_keywords)
+            log_gamma_k = pm.Normal('log_gamma_k', mu=parent_gamma, sigma=gamma_keyword_sigma, shape=n_keywords)
 
             pm.Deterministic('alpha_cluster', pm.math.exp(log_alpha_cluster))
             pm.Deterministic('beta_cluster', pm.math.exp(log_beta_cluster))
             pm.Deterministic('gamma_cluster', pm.math.exp(log_gamma_cluster))
         else:
-            log_alpha_k = pm.Normal('log_alpha_k', mu=mu_log_alpha_global, sigma=sigma_log_alpha_global, shape=n_keywords)
-            log_beta_k = pm.Normal('log_beta_k', mu=mu_log_beta_global, sigma=sigma_log_beta_global, shape=n_keywords)
-            log_gamma_k = pm.Normal('log_gamma_k', mu=mu_log_gamma_global, sigma=sigma_log_gamma_global, shape=n_keywords)
+            log_alpha_k = pm.Normal('log_alpha_k', mu=mu_log_alpha_global, sigma=alpha_keyword_sigma, shape=n_keywords)
+            log_beta_k = pm.Normal('log_beta_k', mu=mu_log_beta_global, sigma=beta_keyword_sigma, shape=n_keywords)
+            log_gamma_k = pm.Normal('log_gamma_k', mu=mu_log_gamma_global, sigma=gamma_keyword_sigma, shape=n_keywords)
 
         alpha_k = pm.Deterministic('alpha_k', pm.math.exp(log_alpha_k))
         beta_k = pm.Deterministic('beta_k', pm.math.exp(log_beta_k))

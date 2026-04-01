@@ -5,6 +5,9 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from ..config import HierarchyConfig
+from .pooling import compute_keyword_prior_scale
+
 
 @dataclass(slots=True)
 class HierarchyInputs:
@@ -17,6 +20,8 @@ class HierarchyInputs:
     keyword_idx_to_cluster_idx: np.ndarray | None
     keyword_train_count: np.ndarray
     test_keyword_train_count: np.ndarray
+    keyword_is_long_tail: np.ndarray
+    keyword_prior_scale: np.ndarray
     keyword_to_idx: dict[str, int]
     cluster_id_to_idx: dict[int, int]
     keyword_to_cluster_id: dict[str, int]
@@ -37,6 +42,7 @@ def build_hierarchy_inputs(
     segment_table: pd.DataFrame,
     use_semantic_clustering: bool,
     noise_label: int = -1,
+    hierarchy_config: HierarchyConfig | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, HierarchyInputs]:
     train_out = train_df.copy()
     test_out = test_df.copy()
@@ -52,6 +58,20 @@ def build_hierarchy_inputs(
     keyword_train_count = np.zeros(n_keywords, dtype=np.int32)
     for keyword, keyword_idx in keyword_to_idx.items():
         keyword_train_count[keyword_idx] = int(keyword_counts.get(keyword, 0))
+
+    segment_lookup = (
+        segment_table[['keyword', 'segment']]
+        .dropna(subset=['keyword'])
+        .drop_duplicates(subset=['keyword'])
+        .copy()
+        if 'segment' in segment_table.columns
+        else pd.DataFrame(columns=['keyword', 'segment'])
+    )
+    keyword_is_long_tail = np.zeros(n_keywords, dtype=bool)
+    if len(segment_lookup) > 0:
+        keyword_to_segment = dict(zip(segment_lookup['keyword'].astype(str), segment_lookup['segment'], strict=False))
+        for keyword, keyword_idx in keyword_to_idx.items():
+            keyword_is_long_tail[keyword_idx] = str(keyword_to_segment.get(keyword, 'head')) == 'long_tail'
 
     test_keyword_train_count = np.zeros(len(test_out), dtype=np.int32)
     if len(test_out) > 0:
@@ -122,6 +142,13 @@ def build_hierarchy_inputs(
             if len(keyword_cluster_df) > 0:
                 keyword_idx_to_cluster_idx[keyword_cluster_df['keyword_idx'].to_numpy(dtype=int)] = keyword_cluster_df['cluster_idx'].to_numpy(dtype=int)
 
+    keyword_prior_scale = compute_keyword_prior_scale(
+        keyword_train_count=keyword_train_count,
+        keyword_is_long_tail=keyword_is_long_tail,
+        hierarchy_config=hierarchy_config or HierarchyConfig(),
+        n_keywords=n_keywords,
+    )
+
     hierarchy_inputs = HierarchyInputs(
         train_keyword_idx=train_out['keyword_idx'].to_numpy(dtype=np.int32),
         test_keyword_idx=test_out['keyword_idx'].to_numpy(dtype=float),
@@ -132,6 +159,8 @@ def build_hierarchy_inputs(
         keyword_idx_to_cluster_idx=keyword_idx_to_cluster_idx,
         keyword_train_count=keyword_train_count,
         test_keyword_train_count=test_keyword_train_count,
+        keyword_is_long_tail=keyword_is_long_tail,
+        keyword_prior_scale=keyword_prior_scale,
         keyword_to_idx=keyword_to_idx,
         cluster_id_to_idx=cluster_id_to_idx,
         keyword_to_cluster_id=keyword_to_cluster_id,

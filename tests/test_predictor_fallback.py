@@ -35,6 +35,8 @@ def _hierarchy_inputs():
         keyword_idx_to_cluster_idx=np.array([0, 1], dtype=int),
         keyword_train_count=np.array([5, 3], dtype=np.int32),
         test_keyword_train_count=np.array([5, 0, 0], dtype=np.int32),
+        keyword_is_long_tail=np.array([False, True]),
+        keyword_prior_scale=np.array([1.5, 0.7]),
         keyword_to_idx={'a': 0, 'b': 1},
         cluster_id_to_idx={10: 0, 20: 1},
         keyword_to_cluster_id={'a': 10, 'b': 20},
@@ -61,3 +63,30 @@ def test_predict_hierarchical_keyword_prefers_keyword_and_surrogates_unseen():
     )
     assert pred_df['posterior_source'].tolist() == ['keyword', 'cluster_surrogate', 'global_surrogate']
     assert pred_df['predicted'].tolist() == [11.0, 201.0, 1001.0]
+
+
+
+def test_predict_hierarchical_keyword_uses_surrogate_for_low_support_seen_keyword():
+    h = _hierarchy_inputs()
+    h.test_keyword_idx = np.array([1.0, np.nan], dtype=float)
+    h.test_keyword_train_count = np.array([1, 0], dtype=np.int32)
+    h.test_cluster_idx = np.array([1.0, np.nan], dtype=float)
+    pred_df = predict_hierarchical_keyword(
+        curve=_DummyCurve(),
+        distribution=_DummyDistribution(),
+        x_scaled=np.array([1.0, 1.0]),
+        posterior_means={
+            'alpha_k': np.array([10.0, 20.0]),
+            'alpha_cluster': np.array([100.0, 200.0]),
+            'alpha_global': 1000.0,
+        },
+        hierarchy_inputs=h,
+        test_df=pd.DataFrame({'click': [1, 2]}),
+        hierarchy_config=HierarchyConfig(
+            min_train_rows_for_keyword_prediction=3,
+            use_cluster_surrogate_for_unseen=True,
+            use_global_surrogate_for_unseen=True,
+        ),
+    )
+    assert pred_df['posterior_source'].tolist() == ['cluster_surrogate', 'global_surrogate']
+    assert pred_df['predicted'].tolist() == [201.0, 1001.0]

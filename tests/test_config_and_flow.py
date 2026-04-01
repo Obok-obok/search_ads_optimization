@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from src.config import BacktestConfig, DataConfig, SegmentationConfig, SemanticClusteringConfig, SplitConfig, TrainingConfig
+from src.config import BacktestConfig, DataConfig, HierarchyConfig, SegmentationConfig, SemanticClusteringConfig, SplitConfig, TrainingConfig
 from src.data.aggregators import aggregate_data
 from src.data.splitters import split_train_test
 from src.models.hierarchy import build_hierarchy_inputs
@@ -59,3 +59,24 @@ def test_hierarchy_inputs_noise_cluster_is_ignored_and_counts_preserved():
     assert pd.isna(test_out.loc[test_out['keyword'] == 'x', 'keyword_idx']).all()
     assert h.train_cluster_idx is not None and h.train_cluster_idx.dtype.kind == 'f'
     assert np.isnan(h.train_cluster_idx[-1])
+
+
+
+def test_hierarchy_inputs_build_keyword_prior_scale_with_long_tail_penalty():
+    train_df = pd.DataFrame({'keyword': ['a', 'a', 'a', 'b'], 'spend': [1, 2, 2, 1], 'click': [1, 2, 2, 1]})
+    test_df = pd.DataFrame({'keyword': ['a', 'b'], 'spend': [1, 2], 'click': [1, 2]})
+    segment_table = pd.DataFrame({
+        'keyword': ['a', 'b'],
+        'segment': ['head', 'long_tail'],
+        'cluster_id': [-1, -1],
+    })
+    _, _, h = build_hierarchy_inputs(
+        train_df,
+        test_df,
+        segment_table,
+        False,
+        hierarchy_config=HierarchyConfig(keyword_pooling_strength=1.0, long_tail_pooling_multiplier=2.0),
+    )
+    assert h.keyword_train_count.tolist() == [3, 1]
+    assert h.keyword_is_long_tail.tolist() == [False, True]
+    assert h.keyword_prior_scale[0] > h.keyword_prior_scale[1]

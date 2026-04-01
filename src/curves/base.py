@@ -20,6 +20,7 @@ class BaseCurve(ABC):
         cluster_idx: np.ndarray | None = None,
         n_clusters: int = 0,
         keyword_idx_to_cluster_idx: np.ndarray | None = None,
+        keyword_prior_scale: np.ndarray | None = None,
     ):
         raise NotImplementedError
 

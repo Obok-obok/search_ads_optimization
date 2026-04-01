@@ -2,11 +2,12 @@
 
 Config-driven hierarchical Bayesian search-ads modeling project.
 
-## What is in this stable refactor
+## What is in this stable refactor (v15)
 
 - Package-style imports across `src/*`
 - Conservative semantic clustering defaults for VM stability
 - Runtime diagnostics for segmentation, clustering, and fallback levels
+- Hierarchy refactor: sparse-seen fallback gate, explicit global→cluster vs cluster→keyword priors, and per-keyword pooling scales
 - Cleaner artifact export with diagnostic CSV/XLSX sheets
 - Basic input validation for load, aggregate, and backtest stages
 
@@ -23,8 +24,8 @@ Config-driven hierarchical Bayesian search-ads modeling project.
   - clustering OFF: `global -> keyword`
   - clustering ON: `global -> cluster -> keyword`
 - Prediction fallback order:
-  - dense keyword -> `keyword`
-  - sparse keyword with valid cluster -> `cluster`
+  - seen keyword with train rows >= `min_train_rows_for_keyword_prediction` -> `keyword`
+  - otherwise, if a valid cluster exists -> `cluster`
   - otherwise -> `global`
 - Curves: `log`, `hill`
 - Likelihoods: `gaussian`, `nb`, `zinb`
