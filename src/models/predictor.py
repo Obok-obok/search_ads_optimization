@@ -7,6 +7,7 @@ import numpy as np
 from ..config import HierarchyConfig
 from ..curves.base import BaseCurve
 from ..distributions.base import BaseDistribution
+from .hierarchy import HierarchyInputs
 
 
 def extract_posterior_means(trace) -> dict[str, Any]:
@@ -17,86 +18,85 @@ def extract_posterior_means(trace) -> dict[str, Any]:
     return means
 
 
-def choose_prediction_level(
-    keyword_idx: float | int | None,
-    cluster_idx: float | int | None,
-    use_semantic_clustering: bool,
-    keyword_train_count: int | None = None,
-    hierarchy_config: HierarchyConfig | None = None,
-) -> str:
-    cfg = hierarchy_config or HierarchyConfig()
-    has_keyword = (
-        keyword_idx is not None
-        and np.isfinite(keyword_idx)
-        and keyword_idx >= 0
-    )
-    has_cluster = (
-        use_semantic_clustering
-        and cluster_idx is not None
-        and np.isfinite(cluster_idx)
-        and cluster_idx >= 0
-    )
-
-    if has_keyword:
-        count = int(keyword_train_count or 0)
-        if count >= int(cfg.min_train_rows_for_keyword_prediction):
-            return 'keyword'
-        if has_cluster and cfg.prefer_cluster_for_sparse_keywords:
-            return 'cluster'
-        return 'keyword'
-
-    if has_cluster:
-        return 'cluster'
-    return 'global'
-
-
-def predict_with_fallback(
+def _predict_by_source(
     curve: BaseCurve,
     distribution: BaseDistribution,
     x_scaled: np.ndarray,
-    keyword_idx: np.ndarray,
     posterior_means: dict[str, Any],
-    use_semantic_clustering: bool,
-    cluster_idx: np.ndarray | None = None,
-    keyword_train_counts: np.ndarray | None = None,
+    source: str,
+    indices: np.ndarray | None = None,
+) -> np.ndarray:
+    mu = curve.predict_level_numpy(
+        np.asarray(x_scaled, dtype=float),
+        posterior_means,
+        source,
+        None if indices is None else np.asarray(indices, dtype=int),
+    )
+    return np.asarray(distribution.postprocess_prediction(np.asarray(mu, dtype=float), posterior_means), dtype=float)
+
+
+def predict_hierarchical_keyword(
+    curve: BaseCurve,
+    distribution: BaseDistribution,
+    x_scaled: np.ndarray,
+    posterior_means: dict[str, Any],
+    hierarchy_inputs: HierarchyInputs,
+    test_df,
     hierarchy_config: HierarchyConfig | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
-    pred = np.zeros_like(x_scaled, dtype=float)
-    levels = np.empty(len(x_scaled), dtype=object)
+):
     cfg = hierarchy_config or HierarchyConfig()
+    pred = np.zeros(len(x_scaled), dtype=float)
+    posterior_source = np.full(len(x_scaled), '', dtype=object)
 
-    for i in range(len(x_scaled)):
-        k = keyword_idx[i] if keyword_idx is not None else None
-        c = None if cluster_idx is None else cluster_idx[i]
-        train_count = None if keyword_train_counts is None else int(keyword_train_counts[i])
-        level = choose_prediction_level(
-            keyword_idx=k,
-            cluster_idx=c,
-            use_semantic_clustering=use_semantic_clustering,
-            keyword_train_count=train_count,
-            hierarchy_config=cfg,
+    keyword_valid = np.isfinite(hierarchy_inputs.test_keyword_idx) & (hierarchy_inputs.test_keyword_idx >= 0)
+    cluster_valid = (
+        hierarchy_inputs.test_cluster_idx is not None
+        and np.isfinite(hierarchy_inputs.test_cluster_idx)
+        & (hierarchy_inputs.test_cluster_idx >= 0)
+    )
+    if hierarchy_inputs.test_cluster_idx is None:
+        cluster_valid = np.zeros(len(x_scaled), dtype=bool)
+
+    if keyword_valid.any():
+        pred[keyword_valid] = _predict_by_source(
+            curve=curve,
+            distribution=distribution,
+            x_scaled=x_scaled[keyword_valid],
+            posterior_means=posterior_means,
+            source='keyword',
+            indices=hierarchy_inputs.test_keyword_idx[keyword_valid],
         )
-        levels[i] = level
-        if level == 'global':
-            mu = curve.predict_level_numpy(
-                np.asarray([x_scaled[i]], dtype=float),
-                posterior_means,
-                'global',
-            )
-        elif level == 'cluster':
-            mu = curve.predict_level_numpy(
-                np.asarray([x_scaled[i]], dtype=float),
-                posterior_means,
-                'cluster',
-                np.asarray([int(c)], dtype=int),
-            )
-        else:
-            mu = curve.predict_level_numpy(
-                np.asarray([x_scaled[i]], dtype=float),
-                posterior_means,
-                'keyword',
-                np.asarray([int(k)], dtype=int),
-            )
-        pred[i] = float(distribution.postprocess_prediction(np.asarray(mu, dtype=float), posterior_means)[0])
+        posterior_source[keyword_valid] = 'keyword'
 
-    return pred, levels
+    unseen_mask = ~keyword_valid
+    if unseen_mask.any():
+        if bool(cfg.use_cluster_surrogate_for_unseen) and np.any(cluster_valid & unseen_mask):
+            mask = cluster_valid & unseen_mask
+            pred[mask] = _predict_by_source(
+                curve=curve,
+                distribution=distribution,
+                x_scaled=x_scaled[mask],
+                posterior_means=posterior_means,
+                source='cluster',
+                indices=hierarchy_inputs.test_cluster_idx[mask],
+            )
+            posterior_source[mask] = 'cluster_surrogate'
+
+        remaining = unseen_mask & (posterior_source == '')
+        if remaining.any():
+            if not bool(cfg.use_global_surrogate_for_unseen):
+                raise ValueError('Encountered unseen test keywords with no allowed surrogate prediction source.')
+            pred[remaining] = _predict_by_source(
+                curve=curve,
+                distribution=distribution,
+                x_scaled=x_scaled[remaining],
+                posterior_means=posterior_means,
+                source='global',
+                indices=None,
+            )
+            posterior_source[remaining] = 'global_surrogate'
+
+    out = test_df.copy()
+    out['predicted'] = pred
+    out['posterior_source'] = posterior_source
+    return out

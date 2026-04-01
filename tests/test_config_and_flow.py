@@ -51,11 +51,11 @@ def test_hierarchy_inputs_noise_cluster_is_ignored_and_counts_preserved():
     train_out, test_out, h = build_hierarchy_inputs(train_df, test_df, segment_table, True, noise_label=-1)
     assert h.n_keywords == 2
     assert h.n_clusters == 1
-    assert h.keyword_to_cluster_idx is not None
-    assert h.keyword_to_cluster_idx[0] == 0
-    assert h.keyword_to_cluster_idx[1] == -1
-    assert h.keyword_train_counts.tolist() == [2, 1]
-    assert h.keyword_train_counts_test.tolist() == [2, 0]
+    assert h.keyword_idx_to_cluster_idx is not None
+    assert h.keyword_idx_to_cluster_idx[0] == 0
+    assert h.keyword_idx_to_cluster_idx[1] == -1
+    assert h.keyword_train_count.tolist() == [2, 1]
+    assert h.test_keyword_train_count.tolist() == [2, 0]
     assert pd.isna(test_out.loc[test_out['keyword'] == 'x', 'keyword_idx']).all()
-    assert h.cluster_idx_train is not None and h.cluster_idx_train.dtype.kind == 'f'
-    assert np.isnan(h.cluster_idx_train[-1])
+    assert h.train_cluster_idx is not None and h.train_cluster_idx.dtype.kind == 'f'
+    assert np.isnan(h.train_cluster_idx[-1])

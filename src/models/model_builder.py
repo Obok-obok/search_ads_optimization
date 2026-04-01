@@ -27,7 +27,7 @@ def build_model(
     config: BacktestConfig,
     cluster_idx: np.ndarray | None = None,
     n_clusters: int = 0,
-    keyword_to_cluster_idx: np.ndarray | None = None,
+    keyword_idx_to_cluster_idx: np.ndarray | None = None,
 ) -> BuiltModel:
     with pm.Model() as model:
         mu = curve.build_mu(
@@ -38,7 +38,7 @@ def build_model(
             config=config,
             cluster_idx=cluster_idx,
             n_clusters=n_clusters,
-            keyword_to_cluster_idx=keyword_to_cluster_idx,
+            keyword_idx_to_cluster_idx=keyword_idx_to_cluster_idx,
         )
         distribution.add_likelihood('y_obs', mu=mu, y_obs=y_obs, config=config)
     return BuiltModel(model=model, curve_name=curve.name, distribution_name=distribution.name)

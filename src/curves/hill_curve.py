@@ -20,7 +20,7 @@ class HillCurve(BaseCurve):
         config: Any,
         cluster_idx: np.ndarray | None = None,
         n_clusters: int = 0,
-        keyword_to_cluster_idx: np.ndarray | None = None,
+        keyword_idx_to_cluster_idx: np.ndarray | None = None,
     ):
         priors = config.curve_priors
         alpha_center = (
@@ -37,9 +37,9 @@ class HillCurve(BaseCurve):
         sigma_log_gamma_global = pm.HalfNormal('sigma_log_gamma_global', sigma=priors.sigma_log_gamma_scale)
 
         has_valid_cluster = (
-            keyword_to_cluster_idx is not None
+            keyword_idx_to_cluster_idx is not None
             and n_clusters > 0
-            and np.any(keyword_to_cluster_idx >= 0)
+            and np.any(keyword_idx_to_cluster_idx >= 0)
         )
 
         if has_valid_cluster:
@@ -51,8 +51,8 @@ class HillCurve(BaseCurve):
             sigma_log_beta_keyword = pm.HalfNormal('sigma_log_beta_keyword', sigma=priors.sigma_log_beta_cluster_scale)
             sigma_log_gamma_keyword = pm.HalfNormal('sigma_log_gamma_keyword', sigma=priors.sigma_log_gamma_cluster_scale)
 
-            safe_cluster_idx = np.where(keyword_to_cluster_idx >= 0, keyword_to_cluster_idx, 0).astype(int)
-            valid_cluster_mask = (keyword_to_cluster_idx >= 0)
+            safe_cluster_idx = np.where(keyword_idx_to_cluster_idx >= 0, keyword_idx_to_cluster_idx, 0).astype(int)
+            valid_cluster_mask = (keyword_idx_to_cluster_idx >= 0)
 
             parent_alpha_cluster = log_alpha_cluster[safe_cluster_idx]
             parent_beta_cluster = log_beta_cluster[safe_cluster_idx]

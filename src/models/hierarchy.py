@@ -8,15 +8,27 @@ import pandas as pd
 
 @dataclass(slots=True)
 class HierarchyInputs:
-    keyword_idx_train: np.ndarray
-    keyword_idx_test: np.ndarray
+    train_keyword_idx: np.ndarray
+    test_keyword_idx: np.ndarray
     n_keywords: int
-    cluster_idx_train: np.ndarray | None
-    cluster_idx_test: np.ndarray | None
+    train_cluster_idx: np.ndarray | None
+    test_cluster_idx: np.ndarray | None
     n_clusters: int
-    keyword_to_cluster_idx: np.ndarray | None
-    keyword_train_counts: np.ndarray
-    keyword_train_counts_test: np.ndarray
+    keyword_idx_to_cluster_idx: np.ndarray | None
+    keyword_train_count: np.ndarray
+    test_keyword_train_count: np.ndarray
+    keyword_to_idx: dict[str, int]
+    cluster_id_to_idx: dict[int, int]
+    keyword_to_cluster_id: dict[str, int]
+
+
+def _ensure_cluster_id_column(df: pd.DataFrame, noise_label: int) -> pd.DataFrame:
+    out = df.copy()
+    if 'cluster_id' not in out.columns:
+        out['cluster_id'] = int(noise_label)
+    out['cluster_id'] = out['cluster_id'].fillna(int(noise_label)).astype(int)
+    return out
+
 
 
 def build_hierarchy_inputs(
@@ -30,80 +42,98 @@ def build_hierarchy_inputs(
     test_out = test_df.copy()
 
     all_keywords = sorted(train_out['keyword'].astype(str).unique())
-    keyword_to_idx = {kw: idx for idx, kw in enumerate(all_keywords)}
+    keyword_to_idx = {keyword: idx for idx, keyword in enumerate(all_keywords)}
     keyword_counts = train_out['keyword'].astype(str).value_counts()
 
     train_out['keyword_idx'] = train_out['keyword'].map(keyword_to_idx).astype(int)
     test_out['keyword_idx'] = test_out['keyword'].map(keyword_to_idx)
 
     n_keywords = len(all_keywords)
-    keyword_train_counts = np.zeros(n_keywords, dtype=np.int32)
-    for kw, idx in keyword_to_idx.items():
-        keyword_train_counts[idx] = int(keyword_counts.get(kw, 0))
+    keyword_train_count = np.zeros(n_keywords, dtype=np.int32)
+    for keyword, keyword_idx in keyword_to_idx.items():
+        keyword_train_count[keyword_idx] = int(keyword_counts.get(keyword, 0))
 
-    keyword_train_counts_test = np.zeros(len(test_out), dtype=np.int32)
+    test_keyword_train_count = np.zeros(len(test_out), dtype=np.int32)
     if len(test_out) > 0:
         valid_mask = test_out['keyword_idx'].notna()
         if valid_mask.any():
             valid_indices = test_out.loc[valid_mask, 'keyword_idx'].astype(int).to_numpy()
-            keyword_train_counts_test[valid_mask.to_numpy()] = keyword_train_counts[valid_indices]
+            test_keyword_train_count[valid_mask.to_numpy()] = keyword_train_count[valid_indices]
 
-    cluster_idx_train = None
-    cluster_idx_test = None
-    keyword_to_cluster_idx = None
+    train_cluster_idx = None
+    test_cluster_idx = None
+    keyword_idx_to_cluster_idx = None
+    cluster_id_to_idx: dict[int, int] = {}
+    keyword_to_cluster_id: dict[str, int] = {}
     n_clusters = 0
 
     if use_semantic_clustering:
-        valid_clusters = segment_table[['keyword', 'cluster_id']].dropna().copy()
-        if len(valid_clusters) > 0:
-            valid_clusters['cluster_id'] = valid_clusters['cluster_id'].astype(int)
-            valid_clusters = valid_clusters.loc[valid_clusters['cluster_id'] != int(noise_label)].copy()
+        valid_cluster_lookup = segment_table[['keyword', 'cluster_id']].dropna().copy()
+        if len(valid_cluster_lookup) > 0:
+            valid_cluster_lookup['cluster_id'] = valid_cluster_lookup['cluster_id'].astype(int)
+            valid_cluster_lookup = valid_cluster_lookup.loc[valid_cluster_lookup['cluster_id'] != int(noise_label)].copy()
 
-        if len(valid_clusters) > 0:
-            cluster_values = sorted(valid_clusters['cluster_id'].unique().tolist())
-            cluster_to_idx = {cluster_id: idx for idx, cluster_id in enumerate(cluster_values)}
+        train_out = _ensure_cluster_id_column(train_out, noise_label)
+        test_out = _ensure_cluster_id_column(test_out, noise_label)
 
-            # Avoid duplicate cluster_id columns when upstream frames already include
-            # semantic cluster annotations from segment preparation.
+        if len(valid_cluster_lookup) > 0:
+            cluster_ids = sorted(valid_cluster_lookup['cluster_id'].unique().tolist())
+            cluster_id_to_idx = {cluster_id: cluster_idx for cluster_idx, cluster_id in enumerate(cluster_ids)}
+            lookup = valid_cluster_lookup.drop_duplicates(subset=['keyword'])
+            keyword_to_cluster_id = dict(zip(lookup['keyword'].astype(str), lookup['cluster_id'].astype(int), strict=False))
+
             if 'cluster_id' not in train_out.columns:
-                train_out = train_out.merge(valid_clusters, on='keyword', how='left')
+                train_out = train_out.merge(lookup, on='keyword', how='left')
             else:
-                train_out['cluster_id'] = train_out['cluster_id'].fillna(
-                    train_out['keyword'].map(valid_clusters.drop_duplicates('keyword').set_index('keyword')['cluster_id'])
-                )
+                train_out = train_out.merge(lookup, on='keyword', how='left', suffixes=('', '_seg'))
+                if 'cluster_id_seg' in train_out.columns:
+                    train_out['cluster_id'] = train_out['cluster_id'].where(
+                        train_out['cluster_id'].ne(int(noise_label)),
+                        train_out['cluster_id_seg'],
+                    )
+                    train_out = train_out.drop(columns=['cluster_id_seg'])
 
             if 'cluster_id' not in test_out.columns:
-                test_out = test_out.merge(valid_clusters, on='keyword', how='left')
+                test_out = test_out.merge(lookup, on='keyword', how='left')
             else:
-                test_out['cluster_id'] = test_out['cluster_id'].fillna(
-                    test_out['keyword'].map(valid_clusters.drop_duplicates('keyword').set_index('keyword')['cluster_id'])
-                )
+                test_out = test_out.merge(lookup, on='keyword', how='left', suffixes=('', '_seg'))
+                if 'cluster_id_seg' in test_out.columns:
+                    test_out['cluster_id'] = test_out['cluster_id'].where(
+                        test_out['cluster_id'].ne(int(noise_label)),
+                        test_out['cluster_id_seg'],
+                    )
+                    test_out = test_out.drop(columns=['cluster_id_seg'])
 
-            train_out['cluster_idx'] = train_out['cluster_id'].map(cluster_to_idx).astype(float)
-            test_out['cluster_idx'] = test_out['cluster_id'].map(cluster_to_idx).astype(float)
-            cluster_idx_train = train_out['cluster_idx'].to_numpy(dtype=float)
-            cluster_idx_test = test_out['cluster_idx'].to_numpy(dtype=float)
-            n_clusters = len(cluster_to_idx)
+            train_out = _ensure_cluster_id_column(train_out, noise_label)
+            test_out = _ensure_cluster_id_column(test_out, noise_label)
+            train_out['cluster_idx'] = train_out['cluster_id'].map(cluster_id_to_idx).astype(float)
+            test_out['cluster_idx'] = test_out['cluster_id'].map(cluster_id_to_idx).astype(float)
+            train_cluster_idx = train_out['cluster_idx'].to_numpy(dtype=float)
+            test_cluster_idx = test_out['cluster_idx'].to_numpy(dtype=float)
+            n_clusters = len(cluster_id_to_idx)
 
-            kw_cluster = (
+            keyword_cluster_df = (
                 train_out[['keyword_idx', 'cluster_idx']]
                 .dropna(subset=['cluster_idx'])
                 .drop_duplicates('keyword_idx')
                 .sort_values('keyword_idx')
             )
-            keyword_to_cluster_idx = np.full(n_keywords, -1, dtype=int)
-            if len(kw_cluster) > 0:
-                keyword_to_cluster_idx[kw_cluster['keyword_idx'].to_numpy(dtype=int)] = kw_cluster['cluster_idx'].to_numpy(dtype=int)
+            keyword_idx_to_cluster_idx = np.full(n_keywords, -1, dtype=int)
+            if len(keyword_cluster_df) > 0:
+                keyword_idx_to_cluster_idx[keyword_cluster_df['keyword_idx'].to_numpy(dtype=int)] = keyword_cluster_df['cluster_idx'].to_numpy(dtype=int)
 
-    hierarchy = HierarchyInputs(
-        keyword_idx_train=train_out['keyword_idx'].to_numpy(dtype=np.int32),
-        keyword_idx_test=test_out['keyword_idx'].to_numpy(dtype=float),
+    hierarchy_inputs = HierarchyInputs(
+        train_keyword_idx=train_out['keyword_idx'].to_numpy(dtype=np.int32),
+        test_keyword_idx=test_out['keyword_idx'].to_numpy(dtype=float),
         n_keywords=n_keywords,
-        cluster_idx_train=cluster_idx_train,
-        cluster_idx_test=cluster_idx_test,
+        train_cluster_idx=train_cluster_idx,
+        test_cluster_idx=test_cluster_idx,
         n_clusters=n_clusters,
-        keyword_to_cluster_idx=keyword_to_cluster_idx,
-        keyword_train_counts=keyword_train_counts,
-        keyword_train_counts_test=keyword_train_counts_test,
+        keyword_idx_to_cluster_idx=keyword_idx_to_cluster_idx,
+        keyword_train_count=keyword_train_count,
+        test_keyword_train_count=test_keyword_train_count,
+        keyword_to_idx=keyword_to_idx,
+        cluster_id_to_idx=cluster_id_to_idx,
+        keyword_to_cluster_id=keyword_to_cluster_id,
     )
-    return train_out, test_out, hierarchy
+    return train_out, test_out, hierarchy_inputs

@@ -7,52 +7,13 @@ from typing import Any
 
 import pandas as pd
 
-
 DIAGNOSTIC_SHEETS = {
     'segmentation': 'diag_segmentation',
     'clusters': 'diag_clusters',
     'semantic_runtime': 'diag_semantic_runtime',
-    'fallback': 'diag_fallback',
+    'pooling': 'diag_pooling',
+    'hierarchy': 'diag_hierarchy',
 }
-
-
-def _resolve_segment_table(result: dict) -> pd.DataFrame | None:
-    segment_table = result.get('segment_table')
-    if segment_table is None:
-        segment_table = result.get('segments')
-    return segment_table
-
-
-def _ensure_cluster_columns_for_export(
-    df: pd.DataFrame | None,
-    segment_table: pd.DataFrame | None = None,
-    keyword_col: str = 'keyword',
-    noise_label: int = -1,
-) -> pd.DataFrame | None:
-    if df is None:
-        return None
-
-    out = df.copy()
-
-    if segment_table is not None and keyword_col in out.columns and keyword_col in segment_table.columns:
-        merge_cols = [keyword_col] + [col for col in ('cluster_id', 'cluster_size', 'is_clustered') if col in segment_table.columns]
-        if len(merge_cols) > 1:
-            lookup = segment_table[merge_cols].drop_duplicates(subset=[keyword_col])
-            missing = [col for col in ('cluster_id', 'cluster_size', 'is_clustered') if col not in out.columns]
-            if missing:
-                out = out.merge(lookup, on=keyword_col, how='left')
-
-    if 'cluster_id' not in out.columns:
-        out['cluster_id'] = noise_label
-    if 'cluster_size' not in out.columns:
-        out['cluster_size'] = 0
-    if 'is_clustered' not in out.columns:
-        out['is_clustered'] = False
-
-    out['cluster_id'] = out['cluster_id'].fillna(noise_label).astype(int)
-    out['cluster_size'] = out['cluster_size'].fillna(0).astype(int)
-    out['is_clustered'] = out['is_clustered'].fillna(False).astype(bool)
-    return out
 
 
 def _to_jsonable(obj: Any) -> Any:
@@ -65,46 +26,88 @@ def _to_jsonable(obj: Any) -> Any:
     return obj
 
 
+
+def _ensure_export_frame(df: pd.DataFrame | None) -> pd.DataFrame | None:
+    if df is None:
+        return None
+    out = df.copy()
+    if 'cluster_id' in out.columns:
+        out['cluster_id'] = out['cluster_id'].fillna(-1).astype(int)
+    if 'cluster_size' in out.columns:
+        out['cluster_size'] = out['cluster_size'].fillna(0).astype(int)
+    if 'is_clustered' in out.columns:
+        out['is_clustered'] = out['is_clustered'].fillna(False).astype(bool)
+    return out
+
+
+
 def save_backtest_suite(result: dict, output_dir: str) -> None:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    summary_df = result['summary'].copy()
-    segment_table = _resolve_segment_table(result)
-    segment_table = _ensure_cluster_columns_for_export(segment_table, segment_table)
-    train_df = _ensure_cluster_columns_for_export(result['train_aggregated'], segment_table)
-    test_df = _ensure_cluster_columns_for_export(result['test_aggregated'], segment_table)
+    summary = _ensure_export_frame(result.get('summary'))
+    segment_table = _ensure_export_frame(result.get('segment_table'))
+    train_aggregated = _ensure_export_frame(result.get('train_aggregated'))
+    test_aggregated = _ensure_export_frame(result.get('test_aggregated'))
+    train_df = _ensure_export_frame(result.get('train'))
+    test_df = _ensure_export_frame(result.get('test'))
+    predictions_all = _ensure_export_frame(result.get('predictions_all'))
+    keyword_level = _ensure_export_frame(result.get('keyword_level'))
+    cluster_level = _ensure_export_frame(result.get('cluster_level'))
 
-    summary_df.to_csv(output_path / 'summary.csv', index=False, encoding='utf-8-sig')
+    if summary is not None:
+        summary.to_csv(output_path / 'summary.csv', index=False, encoding='utf-8-sig')
     if segment_table is not None:
-        segment_table.to_csv(output_path / 'segments.csv', index=False, encoding='utf-8-sig')
         segment_table.to_csv(output_path / 'segment_table.csv', index=False, encoding='utf-8-sig')
-    train_df.to_csv(output_path / 'train_aggregated.csv', index=False, encoding='utf-8-sig')
-    test_df.to_csv(output_path / 'test_aggregated.csv', index=False, encoding='utf-8-sig')
+    if train_aggregated is not None:
+        train_aggregated.to_csv(output_path / 'train_aggregated.csv', index=False, encoding='utf-8-sig')
+    if test_aggregated is not None:
+        test_aggregated.to_csv(output_path / 'test_aggregated.csv', index=False, encoding='utf-8-sig')
+    if train_df is not None:
+        train_df.to_csv(output_path / 'train.csv', index=False, encoding='utf-8-sig')
+    if test_df is not None:
+        test_df.to_csv(output_path / 'test.csv', index=False, encoding='utf-8-sig')
+    if predictions_all is not None and len(predictions_all) > 0:
+        predictions_all.to_csv(output_path / 'predictions_all.csv', index=False, encoding='utf-8-sig')
+    if keyword_level is not None and len(keyword_level) > 0:
+        keyword_level.to_csv(output_path / 'keyword_level.csv', index=False, encoding='utf-8-sig')
+    if cluster_level is not None and len(cluster_level) > 0:
+        cluster_level.to_csv(output_path / 'cluster_level.csv', index=False, encoding='utf-8-sig')
 
-    for name, pred_df in result['predictions'].items():
-        pred_df = _ensure_cluster_columns_for_export(pred_df, segment_table)
-        pred_df.to_csv(output_path / f'{name}.csv', index=False, encoding='utf-8-sig')
-
-    diagnostics = result.get('diagnostics', {})
+    diagnostics = result.get('diagnostics', {}) or {}
+    diagnostics_dir = output_path / 'diagnostics'
+    diagnostics_dir.mkdir(exist_ok=True)
     for diag_name, diag_df in diagnostics.items():
-        if isinstance(diag_df, pd.DataFrame) and len(diag_df) > 0:
-            diag_df.to_csv(output_path / f'diagnostics_{diag_name}.csv', index=False, encoding='utf-8-sig')
+        if isinstance(diag_df, pd.DataFrame):
+            diag_df = _ensure_export_frame(diag_df)
+            diag_df.to_csv(diagnostics_dir / f'{diag_name}.csv', index=False, encoding='utf-8-sig')
+            if len(diag_df) > 0:
+                diag_df.to_csv(output_path / f'diagnostics_{diag_name}.csv', index=False, encoding='utf-8-sig')
 
     config_snapshot = _to_jsonable(result.get('config_snapshot', {}))
     with open(output_path / 'config_snapshot.json', 'w', encoding='utf-8') as fp:
         json.dump(config_snapshot, fp, ensure_ascii=False, indent=2)
 
     with pd.ExcelWriter(output_path / 'backtest_outputs.xlsx', engine='openpyxl') as writer:
-        summary_df.to_excel(writer, sheet_name='summary', index=False)
+        if summary is not None:
+            summary.to_excel(writer, sheet_name='summary', index=False)
         if segment_table is not None:
-            segment_table.to_excel(writer, sheet_name='segments', index=False)
-        train_df.to_excel(writer, sheet_name='train_aggregated', index=False)
-        test_df.to_excel(writer, sheet_name='test_aggregated', index=False)
+            segment_table.to_excel(writer, sheet_name='segment_table', index=False)
+        if train_aggregated is not None:
+            train_aggregated.to_excel(writer, sheet_name='train_aggregated', index=False)
+        if test_aggregated is not None:
+            test_aggregated.to_excel(writer, sheet_name='test_aggregated', index=False)
+        if train_df is not None:
+            train_df.to_excel(writer, sheet_name='train', index=False)
+        if test_df is not None:
+            test_df.to_excel(writer, sheet_name='test', index=False)
+        if predictions_all is not None and len(predictions_all) > 0:
+            predictions_all.to_excel(writer, sheet_name='predictions_all', index=False)
+        if keyword_level is not None and len(keyword_level) > 0:
+            keyword_level.to_excel(writer, sheet_name='keyword_level', index=False)
+        if cluster_level is not None and len(cluster_level) > 0:
+            cluster_level.to_excel(writer, sheet_name='cluster_level', index=False)
         for diag_name, sheet_name in DIAGNOSTIC_SHEETS.items():
             diag_df = diagnostics.get(diag_name)
             if isinstance(diag_df, pd.DataFrame) and len(diag_df) > 0:
                 diag_df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
-        for name, pred_df in result['predictions'].items():
-            pred_df = _ensure_cluster_columns_for_export(pred_df, segment_table)
-            pred_df.to_excel(writer, sheet_name=name[:31], index=False)

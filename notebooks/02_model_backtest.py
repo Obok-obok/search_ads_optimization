@@ -41,11 +41,12 @@ config = BacktestConfig(
     semantic=SemanticClusteringConfig(
         min_cluster_size=2,
         min_samples=1,
+        show_progress_bar=False,
     ),
     training=TrainingConfig(
         inference_method='advi',
-        advi_steps=2000,
-        posterior_draws=200,
+        advi_steps=4000,
+        posterior_draws=300,
         random_seed=42,
     ),
     curves=('log',),
@@ -60,3 +61,5 @@ raw_df = load_keyword_data('../data/source/keyword.csv', config.data)
 result = run_backtest_suite(raw_df=raw_df, config=config)
 save_backtest_suite(result, '../outputs/backtest/run_001')
 print(result['summary'].head())
+print(result['cluster_level'].head())
+print(result['diagnostics']['pooling'].head())

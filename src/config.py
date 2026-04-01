@@ -79,10 +79,12 @@ class SemanticClusteringConfig:
 
 @dataclass(slots=True)
 class HierarchyConfig:
-    """Keyword/cluster/global fallback policy for stable prediction."""
+    """Hierarchical pooling and unseen-keyword surrogate policy."""
 
-    min_train_rows_for_keyword_prediction: int = 3
-    prefer_cluster_for_sparse_keywords: bool = True
+    keyword_pooling_strength: float = 1.0
+    long_tail_pooling_multiplier: float = 1.0
+    use_cluster_surrogate_for_unseen: bool = True
+    use_global_surrogate_for_unseen: bool = True
 
 
 @dataclass(slots=True)
