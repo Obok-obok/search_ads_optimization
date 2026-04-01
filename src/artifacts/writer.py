@@ -26,6 +26,7 @@ def _to_jsonable(obj: Any) -> Any:
     return obj
 
 
+
 def _ensure_export_frame(df: pd.DataFrame | None) -> pd.DataFrame | None:
     if df is None:
         return None
@@ -39,13 +40,14 @@ def _ensure_export_frame(df: pd.DataFrame | None) -> pd.DataFrame | None:
     return out
 
 
-def _get_frame(result: dict[str, Any], primary_key: str, fallback_key: str | None = None) -> pd.DataFrame | None:
-    frame = result.get(primary_key)
-    if frame is None and fallback_key is not None:
-        frame = result.get(fallback_key)
-    if isinstance(frame, pd.DataFrame):
-        return _ensure_export_frame(frame)
+
+def _pick_frame(result: dict[str, Any], *keys: str) -> pd.DataFrame | None:
+    for key in keys:
+        value = result.get(key)
+        if isinstance(value, pd.DataFrame):
+            return _ensure_export_frame(value)
     return None
+
 
 
 def _save_csv(df: pd.DataFrame | None, path: Path) -> None:
@@ -53,19 +55,25 @@ def _save_csv(df: pd.DataFrame | None, path: Path) -> None:
         df.to_csv(path, index=False, encoding='utf-8-sig')
 
 
-def save_backtest_suite(result: dict, output_dir: str) -> None:
+
+def save_backtest_suite(result: dict[str, Any], output_dir: str) -> None:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    summary = _get_frame(result, 'summary')
-    segment_table = _get_frame(result, 'segment_table', 'segments')
-    train_aggregated = _get_frame(result, 'train_aggregated')
-    test_aggregated = _get_frame(result, 'test_aggregated')
-    train_df = _get_frame(result, 'train')
-    test_df = _get_frame(result, 'test')
-    predictions_all = _get_frame(result, 'predictions_all')
-    keyword_level = _get_frame(result, 'keyword_level')
-    cluster_level = _get_frame(result, 'cluster_level')
+    diagnostics_dir = output_path / 'diagnostics'
+    diagnostics_dir.mkdir(exist_ok=True)
+    predictions_dir = output_path / 'predictions'
+    predictions_dir.mkdir(exist_ok=True)
+
+    summary = _pick_frame(result, 'summary')
+    train_df = _pick_frame(result, 'train')
+    test_df = _pick_frame(result, 'test')
+    train_aggregated = _pick_frame(result, 'train_aggregated')
+    test_aggregated = _pick_frame(result, 'test_aggregated')
+    segment_table = _pick_frame(result, 'segment_table', 'segments')
+    predictions_all = _pick_frame(result, 'predictions_all')
+    keyword_level = _pick_frame(result, 'keyword_level')
+    cluster_level = _pick_frame(result, 'cluster_level')
 
     _save_csv(summary, output_path / 'summary.csv')
     _save_csv(segment_table, output_path / 'segment_table.csv')
@@ -73,22 +81,20 @@ def save_backtest_suite(result: dict, output_dir: str) -> None:
     _save_csv(test_aggregated, output_path / 'test_aggregated.csv')
     _save_csv(train_df, output_path / 'train.csv')
     _save_csv(test_df, output_path / 'test.csv')
+    _save_csv(predictions_all, output_path / 'predictions_all.csv')
+    _save_csv(keyword_level, output_path / 'keyword_level.csv')
+    _save_csv(cluster_level, output_path / 'cluster_level.csv')
+
     if predictions_all is not None and not predictions_all.empty:
-        _save_csv(predictions_all, output_path / 'predictions_all.csv')
-    if keyword_level is not None and not keyword_level.empty:
-        _save_csv(keyword_level, output_path / 'keyword_level.csv')
-    if cluster_level is not None and not cluster_level.empty:
-        _save_csv(cluster_level, output_path / 'cluster_level.csv')
+        _save_csv(predictions_all, predictions_dir / 'predictions_all.csv')
 
     diagnostics_obj = result.get('diagnostics')
     diagnostics: dict[str, pd.DataFrame] = {}
     if isinstance(diagnostics_obj, dict):
-        for diag_name, diag_df in diagnostics_obj.items():
-            if isinstance(diag_df, pd.DataFrame):
-                diagnostics[diag_name] = _ensure_export_frame(diag_df)
+        for diag_name, diag_value in diagnostics_obj.items():
+            if isinstance(diag_value, pd.DataFrame):
+                diagnostics[diag_name] = _ensure_export_frame(diag_value)
 
-    diagnostics_dir = output_path / 'diagnostics'
-    diagnostics_dir.mkdir(exist_ok=True)
     for diag_name, diag_df in diagnostics.items():
         _save_csv(diag_df, diagnostics_dir / f'{diag_name}.csv')
         if diag_df is not None and not diag_df.empty:

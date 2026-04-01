@@ -57,7 +57,19 @@ config = BacktestConfig(
     distribution_priors=DistributionPriorsConfig(),
 )
 
-raw_df = load_keyword_data('../data/source/keyword.csv', config.data)
+candidate_paths = [
+    '../data/source/keyword.csv',
+    'keyword.csv',
+    './keyword.csv',
+]
+
+data_path = next((path for path in candidate_paths if os.path.exists(path)), None)
+if data_path is None:
+    raise FileNotFoundError(
+        "keyword.csv not found. Place the file in ../data/source/keyword.csv or current working directory."
+    )
+
+raw_df = load_keyword_data(data_path, config.data)
 result = run_backtest_suite(raw_df=raw_df, config=config)
 save_backtest_suite(result, '../outputs/backtest/run_001')
 print(result['summary'].head())
