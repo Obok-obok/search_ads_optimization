@@ -26,7 +26,6 @@ def _to_jsonable(obj: Any) -> Any:
     return obj
 
 
-
 def _ensure_export_frame(df: pd.DataFrame | None) -> pd.DataFrame | None:
     if df is None:
         return None
@@ -40,49 +39,60 @@ def _ensure_export_frame(df: pd.DataFrame | None) -> pd.DataFrame | None:
     return out
 
 
+def _get_frame(result: dict[str, Any], primary_key: str, fallback_key: str | None = None) -> pd.DataFrame | None:
+    frame = result.get(primary_key)
+    if frame is None and fallback_key is not None:
+        frame = result.get(fallback_key)
+    if isinstance(frame, pd.DataFrame):
+        return _ensure_export_frame(frame)
+    return None
+
+
+def _save_csv(df: pd.DataFrame | None, path: Path) -> None:
+    if df is not None:
+        df.to_csv(path, index=False, encoding='utf-8-sig')
+
 
 def save_backtest_suite(result: dict, output_dir: str) -> None:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    summary = _ensure_export_frame(result.get('summary'))
-    segment_table = _ensure_export_frame(result.get('segment_table'))
-    train_aggregated = _ensure_export_frame(result.get('train_aggregated'))
-    test_aggregated = _ensure_export_frame(result.get('test_aggregated'))
-    train_df = _ensure_export_frame(result.get('train'))
-    test_df = _ensure_export_frame(result.get('test'))
-    predictions_all = _ensure_export_frame(result.get('predictions_all'))
-    keyword_level = _ensure_export_frame(result.get('keyword_level'))
-    cluster_level = _ensure_export_frame(result.get('cluster_level'))
+    summary = _get_frame(result, 'summary')
+    segment_table = _get_frame(result, 'segment_table', 'segments')
+    train_aggregated = _get_frame(result, 'train_aggregated')
+    test_aggregated = _get_frame(result, 'test_aggregated')
+    train_df = _get_frame(result, 'train')
+    test_df = _get_frame(result, 'test')
+    predictions_all = _get_frame(result, 'predictions_all')
+    keyword_level = _get_frame(result, 'keyword_level')
+    cluster_level = _get_frame(result, 'cluster_level')
 
-    if summary is not None:
-        summary.to_csv(output_path / 'summary.csv', index=False, encoding='utf-8-sig')
-    if segment_table is not None:
-        segment_table.to_csv(output_path / 'segment_table.csv', index=False, encoding='utf-8-sig')
-    if train_aggregated is not None:
-        train_aggregated.to_csv(output_path / 'train_aggregated.csv', index=False, encoding='utf-8-sig')
-    if test_aggregated is not None:
-        test_aggregated.to_csv(output_path / 'test_aggregated.csv', index=False, encoding='utf-8-sig')
-    if train_df is not None:
-        train_df.to_csv(output_path / 'train.csv', index=False, encoding='utf-8-sig')
-    if test_df is not None:
-        test_df.to_csv(output_path / 'test.csv', index=False, encoding='utf-8-sig')
-    if predictions_all is not None and len(predictions_all) > 0:
-        predictions_all.to_csv(output_path / 'predictions_all.csv', index=False, encoding='utf-8-sig')
-    if keyword_level is not None and len(keyword_level) > 0:
-        keyword_level.to_csv(output_path / 'keyword_level.csv', index=False, encoding='utf-8-sig')
-    if cluster_level is not None and len(cluster_level) > 0:
-        cluster_level.to_csv(output_path / 'cluster_level.csv', index=False, encoding='utf-8-sig')
+    _save_csv(summary, output_path / 'summary.csv')
+    _save_csv(segment_table, output_path / 'segment_table.csv')
+    _save_csv(train_aggregated, output_path / 'train_aggregated.csv')
+    _save_csv(test_aggregated, output_path / 'test_aggregated.csv')
+    _save_csv(train_df, output_path / 'train.csv')
+    _save_csv(test_df, output_path / 'test.csv')
+    if predictions_all is not None and not predictions_all.empty:
+        _save_csv(predictions_all, output_path / 'predictions_all.csv')
+    if keyword_level is not None and not keyword_level.empty:
+        _save_csv(keyword_level, output_path / 'keyword_level.csv')
+    if cluster_level is not None and not cluster_level.empty:
+        _save_csv(cluster_level, output_path / 'cluster_level.csv')
 
-    diagnostics = result.get('diagnostics', {}) or {}
+    diagnostics_obj = result.get('diagnostics')
+    diagnostics: dict[str, pd.DataFrame] = {}
+    if isinstance(diagnostics_obj, dict):
+        for diag_name, diag_df in diagnostics_obj.items():
+            if isinstance(diag_df, pd.DataFrame):
+                diagnostics[diag_name] = _ensure_export_frame(diag_df)
+
     diagnostics_dir = output_path / 'diagnostics'
     diagnostics_dir.mkdir(exist_ok=True)
     for diag_name, diag_df in diagnostics.items():
-        if isinstance(diag_df, pd.DataFrame):
-            diag_df = _ensure_export_frame(diag_df)
-            diag_df.to_csv(diagnostics_dir / f'{diag_name}.csv', index=False, encoding='utf-8-sig')
-            if len(diag_df) > 0:
-                diag_df.to_csv(output_path / f'diagnostics_{diag_name}.csv', index=False, encoding='utf-8-sig')
+        _save_csv(diag_df, diagnostics_dir / f'{diag_name}.csv')
+        if diag_df is not None and not diag_df.empty:
+            _save_csv(diag_df, output_path / f'diagnostics_{diag_name}.csv')
 
     config_snapshot = _to_jsonable(result.get('config_snapshot', {}))
     with open(output_path / 'config_snapshot.json', 'w', encoding='utf-8') as fp:
@@ -101,13 +111,14 @@ def save_backtest_suite(result: dict, output_dir: str) -> None:
             train_df.to_excel(writer, sheet_name='train', index=False)
         if test_df is not None:
             test_df.to_excel(writer, sheet_name='test', index=False)
-        if predictions_all is not None and len(predictions_all) > 0:
+        if predictions_all is not None and not predictions_all.empty:
             predictions_all.to_excel(writer, sheet_name='predictions_all', index=False)
-        if keyword_level is not None and len(keyword_level) > 0:
+        if keyword_level is not None and not keyword_level.empty:
             keyword_level.to_excel(writer, sheet_name='keyword_level', index=False)
-        if cluster_level is not None and len(cluster_level) > 0:
+        if cluster_level is not None and not cluster_level.empty:
             cluster_level.to_excel(writer, sheet_name='cluster_level', index=False)
+
         for diag_name, sheet_name in DIAGNOSTIC_SHEETS.items():
             diag_df = diagnostics.get(diag_name)
-            if isinstance(diag_df, pd.DataFrame) and len(diag_df) > 0:
+            if diag_df is not None and not diag_df.empty:
                 diag_df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
