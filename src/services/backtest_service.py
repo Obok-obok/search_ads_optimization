@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
@@ -24,6 +23,10 @@ _CLUSTER_DEFAULTS: dict[str, Any] = {
     'cluster_id': -1,
     'cluster_size': 0,
     'is_clustered': False,
+    'cluster_representative_keyword': None,
+    'topic': 'unknown',
+    'intent': 'general',
+    'routing_key': None,
 }
 
 
@@ -55,31 +58,38 @@ def normalize_cluster_columns(
 
     out = df.copy()
     out.attrs = {}
-    merge_cols = [keyword_col, 'cluster_id', 'cluster_size', 'is_clustered']
+    merge_cols = [keyword_col, 'cluster_id', 'cluster_size', 'is_clustered', 'cluster_representative_keyword', 'topic', 'intent', 'routing_key']
     defaults = {
         'cluster_id': int(noise_label),
         'cluster_size': 0,
         'is_clustered': False,
+        'cluster_representative_keyword': None,
+        'topic': 'unknown',
+        'intent': 'general',
+        'routing_key': None,
     }
 
     if segment_table is not None and keyword_col in out.columns and keyword_col in segment_table.columns:
         lookup = segment_table[[c for c in merge_cols if c in segment_table.columns]].drop_duplicates(subset=[keyword_col]).copy()
         lookup.attrs = {}
         if len(lookup) > 0:
-            if any(col not in out.columns for col in lookup.columns if col != keyword_col):
-                out = out.merge(lookup, on=keyword_col, how='left', suffixes=('', '_seg'))
-            else:
-                out = out.merge(lookup, on=keyword_col, how='left', suffixes=('', '_seg'))
-                for col in ['cluster_id', 'cluster_size', 'is_clustered']:
-                    seg_col = f'{col}_seg'
-                    if seg_col in out.columns:
+            out = out.merge(lookup, on=keyword_col, how='left', suffixes=('', '_seg'))
+            for col in ['cluster_id', 'cluster_size', 'is_clustered', 'cluster_representative_keyword', 'topic', 'intent', 'routing_key']:
+                seg_col = f'{col}_seg'
+                if seg_col in out.columns:
+                    if col in out.columns:
                         out[col] = out[col].combine_first(out[seg_col])
-                        out = out.drop(columns=[seg_col])
+                    else:
+                        out[col] = out[seg_col]
+                    out = out.drop(columns=[seg_col])
 
     for col, default in defaults.items():
         if col not in out.columns:
             out[col] = default
-        out[col] = out[col].fillna(default)
+        if default is None:
+            out[col] = out[col].where(out[col].notna(), None)
+        else:
+            out[col] = out[col].fillna(default)
 
     out['cluster_id'] = out['cluster_id'].astype(int)
     out['cluster_size'] = out['cluster_size'].astype(int)
@@ -95,8 +105,9 @@ def _prepare_segment_frames(
     *,
     noise_label: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    segment_cols = ['keyword', 'segment', 'cluster_id', 'cluster_size', 'is_clustered']
-    mapping = segment_table[segment_cols].drop_duplicates(subset=['keyword']).copy()
+    segment_cols = ['keyword', 'segment', 'cluster_id', 'cluster_size', 'is_clustered', 'cluster_representative_keyword', 'topic', 'intent', 'routing_key']
+    available_cols = [c for c in segment_cols if c in segment_table.columns]
+    mapping = segment_table[available_cols].drop_duplicates(subset=['keyword']).copy()
     train_df = train_aggregated.merge(mapping, on='keyword', how='left')
     test_df = test_aggregated.merge(mapping, on='keyword', how='left')
     train_df = normalize_cluster_columns(train_df, segment_table=mapping, noise_label=noise_label)
@@ -106,6 +117,20 @@ def _prepare_segment_frames(
         test_df['segment'] = 'long_tail'
     else:
         test_df['segment'] = test_df['segment'].fillna('long_tail')
+    if 'routing_key' not in test_df.columns:
+        test_df['routing_key'] = None
+    if 'topic' not in test_df.columns:
+        test_df['topic'] = 'unknown'
+    if 'intent' not in test_df.columns:
+        test_df['intent'] = 'general'
+    unseen_mask = test_df['routing_key'].isna() & test_df['segment'].eq('long_tail')
+    test_df.loc[unseen_mask, 'topic'] = test_df.loc[unseen_mask, 'topic'].replace('', 'unknown').fillna('unknown')
+    test_df.loc[unseen_mask, 'intent'] = test_df.loc[unseen_mask, 'intent'].replace('', 'general').fillna('general')
+    test_df.loc[unseen_mask, 'routing_key'] = (
+        test_df.loc[unseen_mask, 'segment'].astype(str) + '__' +
+        test_df.loc[unseen_mask, 'topic'].astype(str) + '__' +
+        test_df.loc[unseen_mask, 'intent'].astype(str)
+    )
 
     train_df = train_df.loc[train_df['segment'] == segment].copy()
     test_df = test_df.loc[test_df['segment'] == segment].copy()
@@ -124,16 +149,8 @@ def _run_single_model(
     curve = get_curve(curve_name)
     distribution = get_distribution(likelihood_name)
 
-    train_df = normalize_cluster_columns(
-        train_df,
-        segment_table=segment_table,
-        noise_label=int(config.semantic.cluster_noise_label),
-    )
-    test_df = normalize_cluster_columns(
-        test_df,
-        segment_table=segment_table,
-        noise_label=int(config.semantic.cluster_noise_label),
-    )
+    train_df = normalize_cluster_columns(train_df, segment_table=segment_table, noise_label=int(config.semantic.cluster_noise_label))
+    test_df = normalize_cluster_columns(test_df, segment_table=segment_table, noise_label=int(config.semantic.cluster_noise_label))
 
     train_df, test_df, hierarchy_inputs = build_hierarchy_inputs(
         train_df=train_df,
@@ -178,19 +195,12 @@ def _run_single_model(
         test_df=test_df,
         hierarchy_config=config.hierarchy,
     )
-    pred_df = normalize_cluster_columns(
-        pred_df,
-        segment_table=segment_table,
-        noise_label=int(config.semantic.cluster_noise_label),
-    )
+    pred_df = normalize_cluster_columns(pred_df, segment_table=segment_table, noise_label=int(config.semantic.cluster_noise_label))
     pred_df['pred_click'] = pred_df['predicted']
     pred_df['actual_click'] = pred_df['click']
     pred_df['spend_scale'] = spend_scale
     pred_df['test_keyword_idx'] = hierarchy_inputs.test_keyword_idx
-    if hierarchy_inputs.test_cluster_idx is not None:
-        pred_df['test_cluster_idx'] = hierarchy_inputs.test_cluster_idx
-    else:
-        pred_df['test_cluster_idx'] = np.nan
+    pred_df['test_cluster_idx'] = hierarchy_inputs.test_cluster_idx if hierarchy_inputs.test_cluster_idx is not None else np.nan
     pred_df['test_keyword_train_row_count'] = hierarchy_inputs.test_keyword_train_row_count
     pred_df['min_train_rows_for_keyword_prediction'] = int(config.hierarchy.min_train_rows_for_keyword_prediction)
 
@@ -223,24 +233,9 @@ def _build_segmentation_diagnostics(segment_table: pd.DataFrame) -> pd.DataFrame
             'clustered_keywords': int(segment_df['is_clustered'].sum()),
             'noise_keywords': int((~segment_df['is_clustered']).sum()),
             'noise_share': float((~segment_df['is_clustered']).mean()) if len(segment_df) else 0.0,
+            'n_routing_keys': int(segment_df['routing_key'].nunique()) if 'routing_key' in segment_df.columns else 0,
         })
     return pd.DataFrame(rows)
-
-
-def _cluster_representative_keyword_map(segment_table: pd.DataFrame, noise_label: int) -> dict[int, str]:
-    if segment_table.empty or 'cluster_id' not in segment_table.columns:
-        return {}
-    clustered = segment_table.loc[segment_table['cluster_id'].ne(int(noise_label))].copy()
-    if clustered.empty:
-        return {}
-    clustered['keyword'] = clustered['keyword'].astype(str)
-    clustered['keyword_len'] = clustered['keyword'].str.len()
-    reps = (
-        clustered.sort_values(['cluster_id', 'monetary', 'frequency', 'keyword_len', 'keyword'], ascending=[True, False, False, False, True])
-        .groupby('cluster_id', as_index=False)
-        .first()[['cluster_id', 'keyword']]
-    )
-    return {int(row.cluster_id): str(row.keyword) for row in reps.itertuples(index=False)}
 
 
 def _build_cluster_diagnostics(segment_table: pd.DataFrame, noise_label: int) -> pd.DataFrame:
@@ -252,32 +247,18 @@ def _build_cluster_diagnostics(segment_table: pd.DataFrame, noise_label: int) ->
             'noise_share': 1.0,
             'mean_cluster_size': 0.0,
             'max_cluster_size': 0,
+            'cluster_status': 'disabled_or_all_noise',
         }])
-
     cluster_sizes = clustered.groupby('cluster_id')['keyword'].nunique()
-    rep_map = _cluster_representative_keyword_map(segment_table, noise_label)
-    rows = [{
+    noise_share = float((segment_table['cluster_id'] == noise_label).mean())
+    return pd.DataFrame([{
         'n_clusters': int(cluster_sizes.shape[0]),
         'noise_keywords': int((segment_table['cluster_id'] == noise_label).sum()),
-        'noise_share': float((segment_table['cluster_id'] == noise_label).mean()),
+        'noise_share': noise_share,
         'mean_cluster_size': float(cluster_sizes.mean()),
         'max_cluster_size': int(cluster_sizes.max()),
-    }]
-    detail_rows = []
-    for cluster_id, cluster_df in clustered.groupby('cluster_id', dropna=False):
-        detail_rows.append({
-            'cluster_id': int(cluster_id),
-            'segment': cluster_df['segment'].iloc[0] if 'segment' in cluster_df.columns and len(cluster_df) else None,
-            'n_keywords': int(cluster_df['keyword'].nunique()),
-            'cluster_size': int(cluster_df['cluster_size'].max()) if 'cluster_size' in cluster_df.columns else int(cluster_df['keyword'].nunique()),
-            'total_monetary': float(cluster_df['monetary'].sum()) if 'monetary' in cluster_df.columns else float('nan'),
-            'representative_keyword': rep_map.get(int(cluster_id), ''),
-        })
-    summary_df = pd.DataFrame(rows)
-    detail_df = pd.DataFrame(detail_rows)
-    if detail_df.empty:
-        return summary_df
-    return pd.concat([summary_df, detail_df], ignore_index=True, sort=False)
+        'cluster_status': 'ok' if noise_share < 1.0 else 'disabled_or_all_noise',
+    }])
 
 
 def _build_pooling_diagnostics(predictions_all: pd.DataFrame) -> pd.DataFrame:
@@ -301,11 +282,6 @@ def _build_hierarchy_diagnostics(hierarchy_rows: list[dict[str, Any]]) -> pd.Dat
     return pd.DataFrame(hierarchy_rows)
 
 
-def _metric_series_from_group(df: pd.DataFrame) -> pd.Series:
-    metrics = evaluate_predictions(df['click'].to_numpy(), df['predicted'].to_numpy())
-    return pd.Series(metrics)
-
-
 def _build_keyword_level(predictions: dict[str, pd.DataFrame]) -> pd.DataFrame:
     if not predictions:
         return pd.DataFrame()
@@ -313,90 +289,76 @@ def _build_keyword_level(predictions: dict[str, pd.DataFrame]) -> pd.DataFrame:
     for _, pred_df in predictions.items():
         if pred_df.empty:
             continue
-        grouped = pred_df.groupby(['run_name', 'segment', 'keyword', 'cluster_id'], dropna=False).agg(
+        grouped = pred_df.groupby(['run_name', 'run_group_name', 'segment', 'keyword', 'cluster_id'], dropna=False).agg(
             actual_click=('click', 'sum'),
             pred_click=('pred_click', 'sum'),
             spend=('spend', 'sum'),
             n_rows=('keyword', 'size'),
             mean_keyword_train_row_count=('test_keyword_train_row_count', 'first'),
             clustered=('is_clustered', 'max'),
-            posterior_source=('posterior_source', lambda s: s.mode().iat[0] if not s.mode().empty else s.iloc[0]),
+            representative_keyword=('cluster_representative_keyword', 'first'),
+            topic=('topic', 'first'),
+            intent=('intent', 'first'),
+            routing_key=('routing_key', 'first'),
         ).reset_index()
         grouped['abs_error'] = (grouped['actual_click'] - grouped['pred_click']).abs()
         rows.append(grouped)
     return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
 
 
-def _build_cluster_level(predictions: dict[str, pd.DataFrame], segment_table: pd.DataFrame, noise_label: int) -> pd.DataFrame:
+def _build_cluster_level(predictions: dict[str, pd.DataFrame], noise_label: int) -> pd.DataFrame:
     if not predictions:
         return pd.DataFrame()
-    rep_map = _cluster_representative_keyword_map(segment_table, noise_label)
-    rows = []
+    rows: list[dict[str, Any]] = []
     for _, pred_df in predictions.items():
         if pred_df.empty:
             continue
-        metric_df = (
-            pred_df.groupby(['run_name', 'segment', 'cluster_id'], dropna=False)
-            .apply(_metric_series_from_group)
-            .reset_index()
-        )
-        grouped = pred_df.groupby(['run_name', 'segment', 'cluster_id'], dropna=False).agg(
-            actual_click=('click', 'sum'),
-            pred_click=('pred_click', 'sum'),
-            spend=('spend', 'sum'),
-            n_rows=('keyword', 'size'),
-            n_keywords=('keyword', 'nunique'),
-            clustered=('is_clustered', 'max'),
-        ).reset_index()
-        grouped['is_noise_cluster'] = grouped['cluster_id'].eq(int(noise_label))
-        grouped['abs_error'] = (grouped['actual_click'] - grouped['pred_click']).abs()
-        grouped['representative_keyword'] = grouped['cluster_id'].map(lambda x: rep_map.get(int(x), '') if pd.notna(x) else '')
-        grouped = grouped.merge(metric_df, on=['run_name', 'segment', 'cluster_id'], how='left')
-        rows.append(grouped)
-    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+        for keys, group in pred_df.groupby(['run_name', 'run_group_name', 'segment', 'cluster_id'], dropna=False):
+            run_name, run_group_name, segment, cluster_id = keys
+            metrics = evaluate_predictions(group['click'].to_numpy(), group['pred_click'].to_numpy())
+            rows.append({
+                'run_name': run_name,
+                'run_group_name': run_group_name,
+                'segment': segment,
+                'cluster_id': int(cluster_id),
+                'representative_keyword': group['cluster_representative_keyword'].dropna().iloc[0] if group['cluster_representative_keyword'].notna().any() else None,
+                'topic': group['topic'].dropna().iloc[0] if group['topic'].notna().any() else 'unknown',
+                'intent': group['intent'].dropna().iloc[0] if group['intent'].notna().any() else 'general',
+                'routing_key': group['routing_key'].dropna().iloc[0] if group['routing_key'].notna().any() else None,
+                'actual_click': float(group['click'].sum()),
+                'pred_click': float(group['pred_click'].sum()),
+                'spend': float(group['spend'].sum()),
+                'n_rows': int(len(group)),
+                'n_keywords': int(group['keyword'].nunique()),
+                'clustered': bool(group['is_clustered'].max()),
+                'is_noise_cluster': int(cluster_id) == int(noise_label),
+                **metrics,
+            })
+    return pd.DataFrame(rows)
 
 
 def _build_posterior_source_level(predictions: dict[str, pd.DataFrame]) -> pd.DataFrame:
     if not predictions:
         return pd.DataFrame()
-    rows = []
+    rows: list[dict[str, Any]] = []
     for _, pred_df in predictions.items():
         if pred_df.empty:
             continue
-        metric_df = (
-            pred_df.groupby(['run_name', 'segment', 'posterior_source'], dropna=False)
-            .apply(_metric_series_from_group)
-            .reset_index()
-        )
-        grouped = pred_df.groupby(['run_name', 'segment', 'posterior_source'], dropna=False).agg(
-            n_rows=('keyword', 'size'),
-            n_keywords=('keyword', 'nunique'),
-            actual_click=('click', 'sum'),
-            pred_click=('pred_click', 'sum'),
-        ).reset_index()
-        grouped['abs_error'] = (grouped['actual_click'] - grouped['pred_click']).abs()
-        grouped = grouped.merge(metric_df, on=['run_name', 'segment', 'posterior_source'], how='left')
-        rows.append(grouped)
-    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
-
-
-def _build_overall_run_level(predictions: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    if not predictions:
-        return pd.DataFrame()
-    rows = []
-    for run_name, pred_df in predictions.items():
-        if pred_df.empty:
-            continue
-        metrics = evaluate_predictions(pred_df['click'].to_numpy(), pred_df['predicted'].to_numpy())
-        rows.append({
-            'run_name': run_name,
-            'segment': 'overall',
-            'n_rows': int(len(pred_df)),
-            'n_keywords': int(pred_df['keyword'].nunique()),
-            'actual_click': float(pred_df['click'].sum()),
-            'pred_click': float(pred_df['predicted'].sum()),
-            **metrics,
-        })
+        for keys, group in pred_df.groupby(['run_name', 'run_group_name', 'segment', 'posterior_source'], dropna=False):
+            run_name, run_group_name, segment, posterior_source = keys
+            metrics = evaluate_predictions(group['click'].to_numpy(), group['pred_click'].to_numpy())
+            rows.append({
+                'run_name': run_name,
+                'run_group_name': run_group_name,
+                'segment': segment,
+                'posterior_source': posterior_source,
+                'actual_click': float(group['click'].sum()),
+                'pred_click': float(group['pred_click'].sum()),
+                'spend': float(group['spend'].sum()),
+                'n_rows': int(len(group)),
+                'n_keywords': int(group['keyword'].nunique()),
+                **metrics,
+            })
     return pd.DataFrame(rows)
 
 
@@ -409,6 +371,28 @@ def _concat_named_frames(frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
     return pd.concat(ordered, ignore_index=True)
 
 
+def _build_overall_summary(predictions_all: pd.DataFrame) -> pd.DataFrame:
+    if predictions_all.empty:
+        return pd.DataFrame()
+    rows: list[dict[str, Any]] = []
+    group_cols = ['run_group_name', 'use_semantic_clustering', 'semantic_apply_to_segments', 'aggregation_level', 'curve', 'likelihood']
+    for keys, group in predictions_all.groupby(group_cols, dropna=False):
+        metrics = evaluate_predictions(group['click'].to_numpy(), group['pred_click'].to_numpy())
+        run_group_name, use_semantic_clustering, semantic_apply_to_segments, aggregation_level, curve, likelihood = keys
+        rows.append({
+            'run_name': f'overall__{run_group_name}',
+            'run_group_name': run_group_name,
+            'segment': 'overall',
+            'use_semantic_clustering': use_semantic_clustering,
+            'semantic_apply_to_segments': semantic_apply_to_segments,
+            'aggregation_level': aggregation_level,
+            'curve': curve,
+            'likelihood': likelihood,
+            **metrics,
+        })
+    return pd.DataFrame(rows)
+
+
 def run_backtest_suite(raw_df: pd.DataFrame, config: BacktestConfig) -> dict:
     aggregated_df = aggregate_data(raw_df, config.data)
     _validate_aggregated_frame(aggregated_df, 'aggregated_df')
@@ -417,22 +401,12 @@ def run_backtest_suite(raw_df: pd.DataFrame, config: BacktestConfig) -> dict:
     _validate_aggregated_frame(test_aggregated, 'test_aggregated')
 
     segment_table = build_segment_table(train_aggregated, config)
-    segment_table = normalize_cluster_columns(
-        segment_table,
-        segment_table=segment_table,
-        noise_label=int(config.semantic.cluster_noise_label),
-    )
-    cluster_rep_map = _cluster_representative_keyword_map(segment_table, int(config.semantic.cluster_noise_label))
-    if cluster_rep_map:
-        segment_table['cluster_representative_keyword'] = segment_table['cluster_id'].map(lambda x: cluster_rep_map.get(int(x), '') if pd.notna(x) and int(x) != int(config.semantic.cluster_noise_label) else '')
-    else:
-        segment_table['cluster_representative_keyword'] = ''
-    semantic_diags = segment_table.attrs.get('semantic_diagnostics', pd.DataFrame())
-    diagnostics: dict[str, pd.DataFrame] = {
+    diagnostics = {
         'segmentation': _build_segmentation_diagnostics(segment_table),
         'clusters': _build_cluster_diagnostics(segment_table, int(config.semantic.cluster_noise_label)),
-        'semantic_runtime': semantic_diags if isinstance(semantic_diags, pd.DataFrame) else pd.DataFrame(),
     }
+    semantic_diags = segment_table.attrs.get('semantic_diagnostics')
+    diagnostics['semantic_runtime'] = semantic_diags if isinstance(semantic_diags, pd.DataFrame) else pd.DataFrame()
 
     summary_rows: list[dict[str, Any]] = []
     predictions: dict[str, pd.DataFrame] = {}
@@ -452,7 +426,8 @@ def run_backtest_suite(raw_df: pd.DataFrame, config: BacktestConfig) -> dict:
 
         for curve_name in config.curves:
             for likelihood_name in config.likelihoods:
-                run_name = f'{segment}__semantic_{int(config.segmentation.use_semantic_clustering)}__{config.data.aggregation_level}__{curve_name}__{likelihood_name}'
+                run_group_name = f'semantic_{int(config.segmentation.use_semantic_clustering)}__{config.data.aggregation_level}__{curve_name}__{likelihood_name}'
+                run_name = f'{segment}__{run_group_name}'
                 pred_df, metric_dict, hierarchy_diag = _run_single_model(
                     train_df=train_df,
                     test_df=test_df,
@@ -463,9 +438,15 @@ def run_backtest_suite(raw_df: pd.DataFrame, config: BacktestConfig) -> dict:
                 )
                 pred_df['segment'] = segment
                 pred_df['run_name'] = run_name
-                pred_df['cluster_representative_keyword'] = pred_df['cluster_id'].map(lambda x: cluster_rep_map.get(int(x), '') if pd.notna(x) and int(x) != int(config.semantic.cluster_noise_label) else '')
+                pred_df['run_group_name'] = run_group_name
+                pred_df['use_semantic_clustering'] = bool(config.segmentation.use_semantic_clustering)
+                pred_df['semantic_apply_to_segments'] = ','.join(config.segmentation.semantic_apply_to_segments)
+                pred_df['aggregation_level'] = config.data.aggregation_level
+                pred_df['curve'] = curve_name
+                pred_df['likelihood'] = likelihood_name
                 summary_rows.append({
                     'run_name': run_name,
+                    'run_group_name': run_group_name,
                     'segment': segment,
                     'use_semantic_clustering': config.segmentation.use_semantic_clustering,
                     'semantic_apply_to_segments': ','.join(config.segmentation.semantic_apply_to_segments),
@@ -474,31 +455,24 @@ def run_backtest_suite(raw_df: pd.DataFrame, config: BacktestConfig) -> dict:
                     'likelihood': likelihood_name,
                     **metric_dict,
                 })
-                hierarchy_rows.append({'run_name': run_name, 'segment': segment, **hierarchy_diag})
+                hierarchy_rows.append({'run_name': run_name, 'run_group_name': run_group_name, 'segment': segment, **hierarchy_diag})
                 predictions[run_name] = pred_df
                 metrics_map[run_name] = pd.DataFrame([metric_dict])
 
     summary = pd.DataFrame(summary_rows)
-    overall_run_level = _build_overall_run_level(predictions)
-    if len(summary) > 0:
-        summary = pd.concat([summary, overall_run_level], ignore_index=True, sort=False)
-        summary = summary.sort_values(['run_name', 'segment']).reset_index(drop=True)
-
-    train_df = normalize_cluster_columns(
-        train_aggregated,
-        segment_table=segment_table,
-        noise_label=int(config.semantic.cluster_noise_label),
-    )
-    test_df = normalize_cluster_columns(
-        test_aggregated,
-        segment_table=segment_table,
-        noise_label=int(config.semantic.cluster_noise_label),
-    )
+    train_df = normalize_cluster_columns(train_aggregated, segment_table=segment_table, noise_label=int(config.semantic.cluster_noise_label))
+    test_df = normalize_cluster_columns(test_aggregated, segment_table=segment_table, noise_label=int(config.semantic.cluster_noise_label))
     predictions_all = _concat_named_frames(predictions)
+    overall_summary = _build_overall_summary(predictions_all)
+    if len(overall_summary) > 0:
+        summary = pd.concat([summary, overall_summary], ignore_index=True)
+    if len(summary) > 0:
+        summary = summary.sort_values(['segment', 'rmse', 'mae']).reset_index(drop=True)
+
     diagnostics['pooling'] = _build_pooling_diagnostics(predictions_all)
     diagnostics['hierarchy'] = _build_hierarchy_diagnostics(hierarchy_rows)
     keyword_level = _build_keyword_level(predictions)
-    cluster_level = _build_cluster_level(predictions, segment_table, int(config.semantic.cluster_noise_label))
+    cluster_level = _build_cluster_level(predictions, int(config.semantic.cluster_noise_label))
     posterior_source_level = _build_posterior_source_level(predictions)
 
     return {

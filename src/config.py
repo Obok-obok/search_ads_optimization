@@ -46,6 +46,8 @@ class SegmentationConfig:
     use_semantic_clustering: bool = False
     semantic_apply_to_segments: tuple[str, ...] = ('long_tail',)
     min_keywords_per_cluster: int = 3
+    use_topic_intent_routing: bool = False
+    min_keywords_per_routing_group: int = 5
 
 
 @dataclass(slots=True)
