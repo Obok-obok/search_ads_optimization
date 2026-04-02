@@ -33,8 +33,8 @@ def _hierarchy_inputs():
         test_cluster_idx=np.array([0.0, 1.0, np.nan]),
         n_clusters=2,
         keyword_idx_to_cluster_idx=np.array([0, 1], dtype=int),
-        keyword_train_count=np.array([5, 3], dtype=np.int32),
-        test_keyword_train_count=np.array([5, 0, 0], dtype=np.int32),
+        keyword_train_row_count=np.array([5, 3], dtype=np.int32),
+        test_keyword_train_row_count=np.array([5, 0, 0], dtype=np.int32),
         keyword_is_long_tail=np.array([False, True]),
         keyword_prior_scale=np.array([1.5, 0.7]),
         keyword_to_idx={'a': 0, 'b': 1},
@@ -69,7 +69,7 @@ def test_predict_hierarchical_keyword_prefers_keyword_and_surrogates_unseen():
 def test_predict_hierarchical_keyword_uses_surrogate_for_low_support_seen_keyword():
     h = _hierarchy_inputs()
     h.test_keyword_idx = np.array([1.0, np.nan], dtype=float)
-    h.test_keyword_train_count = np.array([1, 0], dtype=np.int32)
+    h.test_keyword_train_row_count = np.array([1, 0], dtype=np.int32)
     h.test_cluster_idx = np.array([1.0, np.nan], dtype=float)
     pred_df = predict_hierarchical_keyword(
         curve=_DummyCurve(),

@@ -51,7 +51,7 @@ def predict_hierarchical_keyword(
     keyword_valid = np.isfinite(hierarchy_inputs.test_keyword_idx) & (hierarchy_inputs.test_keyword_idx >= 0)
     min_rows = max(int(cfg.min_train_rows_for_keyword_prediction), 0)
     if min_rows > 0:
-        keyword_valid = keyword_valid & (np.asarray(hierarchy_inputs.test_keyword_train_count, dtype=int) >= min_rows)
+        keyword_valid = keyword_valid & (np.asarray(hierarchy_inputs.test_keyword_train_row_count, dtype=int) >= min_rows)
     cluster_valid = (
         hierarchy_inputs.test_cluster_idx is not None
         and np.isfinite(hierarchy_inputs.test_cluster_idx)

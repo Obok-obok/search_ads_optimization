@@ -18,8 +18,8 @@ class HierarchyInputs:
     test_cluster_idx: np.ndarray | None
     n_clusters: int
     keyword_idx_to_cluster_idx: np.ndarray | None
-    keyword_train_count: np.ndarray
-    test_keyword_train_count: np.ndarray
+    keyword_train_row_count: np.ndarray
+    test_keyword_train_row_count: np.ndarray
     keyword_is_long_tail: np.ndarray
     keyword_prior_scale: np.ndarray
     keyword_to_idx: dict[str, int]
@@ -49,15 +49,15 @@ def build_hierarchy_inputs(
 
     all_keywords = sorted(train_out['keyword'].astype(str).unique())
     keyword_to_idx = {keyword: idx for idx, keyword in enumerate(all_keywords)}
-    keyword_counts = train_out['keyword'].astype(str).value_counts()
+    keyword_row_counts = train_out['keyword'].astype(str).value_counts()
 
     train_out['keyword_idx'] = train_out['keyword'].map(keyword_to_idx).astype(int)
     test_out['keyword_idx'] = test_out['keyword'].map(keyword_to_idx)
 
     n_keywords = len(all_keywords)
-    keyword_train_count = np.zeros(n_keywords, dtype=np.int32)
+    keyword_train_row_count = np.zeros(n_keywords, dtype=np.int32)
     for keyword, keyword_idx in keyword_to_idx.items():
-        keyword_train_count[keyword_idx] = int(keyword_counts.get(keyword, 0))
+        keyword_train_row_count[keyword_idx] = int(keyword_row_counts.get(keyword, 0))
 
     segment_lookup = (
         segment_table[['keyword', 'segment']]
@@ -73,12 +73,12 @@ def build_hierarchy_inputs(
         for keyword, keyword_idx in keyword_to_idx.items():
             keyword_is_long_tail[keyword_idx] = str(keyword_to_segment.get(keyword, 'head')) == 'long_tail'
 
-    test_keyword_train_count = np.zeros(len(test_out), dtype=np.int32)
+    test_keyword_train_row_count = np.zeros(len(test_out), dtype=np.int32)
     if len(test_out) > 0:
         valid_mask = test_out['keyword_idx'].notna()
         if valid_mask.any():
             valid_indices = test_out.loc[valid_mask, 'keyword_idx'].astype(int).to_numpy()
-            test_keyword_train_count[valid_mask.to_numpy()] = keyword_train_count[valid_indices]
+            test_keyword_train_row_count[valid_mask.to_numpy()] = keyword_train_row_count[valid_indices]
 
     train_cluster_idx = None
     test_cluster_idx = None
@@ -143,7 +143,7 @@ def build_hierarchy_inputs(
                 keyword_idx_to_cluster_idx[keyword_cluster_df['keyword_idx'].to_numpy(dtype=int)] = keyword_cluster_df['cluster_idx'].to_numpy(dtype=int)
 
     keyword_prior_scale = compute_keyword_prior_scale(
-        keyword_train_count=keyword_train_count,
+        keyword_train_count=keyword_train_row_count,
         keyword_is_long_tail=keyword_is_long_tail,
         hierarchy_config=hierarchy_config or HierarchyConfig(),
         n_keywords=n_keywords,
@@ -157,8 +157,8 @@ def build_hierarchy_inputs(
         test_cluster_idx=test_cluster_idx,
         n_clusters=n_clusters,
         keyword_idx_to_cluster_idx=keyword_idx_to_cluster_idx,
-        keyword_train_count=keyword_train_count,
-        test_keyword_train_count=test_keyword_train_count,
+        keyword_train_row_count=keyword_train_row_count,
+        test_keyword_train_row_count=test_keyword_train_row_count,
         keyword_is_long_tail=keyword_is_long_tail,
         keyword_prior_scale=keyword_prior_scale,
         keyword_to_idx=keyword_to_idx,

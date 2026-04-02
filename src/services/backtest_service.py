@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
@@ -36,12 +37,10 @@ def _validate_aggregated_frame(df: pd.DataFrame, frame_name: str) -> None:
         raise ValueError(f'{frame_name} contains negative spend or click values.')
 
 
-
 def _as_config_snapshot(config: BacktestConfig) -> dict[str, Any]:
     if is_dataclass(config):
         return asdict(config)
     return dict(config)
-
 
 
 def normalize_cluster_columns(
@@ -88,7 +87,6 @@ def normalize_cluster_columns(
     return out
 
 
-
 def _prepare_segment_frames(
     train_aggregated: pd.DataFrame,
     test_aggregated: pd.DataFrame,
@@ -103,11 +101,16 @@ def _prepare_segment_frames(
     test_df = test_aggregated.merge(mapping, on='keyword', how='left')
     train_df = normalize_cluster_columns(train_df, segment_table=mapping, noise_label=noise_label)
     test_df = normalize_cluster_columns(test_df, segment_table=mapping, noise_label=noise_label)
+
+    if 'segment' not in test_df.columns:
+        test_df['segment'] = 'long_tail'
+    else:
+        test_df['segment'] = test_df['segment'].fillna('long_tail')
+
     train_df = train_df.loc[train_df['segment'] == segment].copy()
     test_df = test_df.loc[test_df['segment'] == segment].copy()
     segment_mapping = mapping.loc[mapping['segment'] == segment].copy()
     return train_df, test_df, segment_mapping
-
 
 
 def _run_single_model(
@@ -188,7 +191,7 @@ def _run_single_model(
         pred_df['test_cluster_idx'] = hierarchy_inputs.test_cluster_idx
     else:
         pred_df['test_cluster_idx'] = np.nan
-    pred_df['test_keyword_train_count'] = hierarchy_inputs.test_keyword_train_count
+    pred_df['test_keyword_train_row_count'] = hierarchy_inputs.test_keyword_train_row_count
     pred_df['min_train_rows_for_keyword_prediction'] = int(config.hierarchy.min_train_rows_for_keyword_prediction)
 
     metrics = evaluate_predictions(test_df['click'].to_numpy(), pred_df['predicted'].to_numpy())
@@ -202,7 +205,6 @@ def _run_single_model(
         'keyword_rows': int((pred_df['posterior_source'] == 'keyword').sum()),
     }
     return pred_df, metrics, hierarchy_diag
-
 
 
 def _build_segmentation_diagnostics(segment_table: pd.DataFrame) -> pd.DataFrame:
@@ -225,6 +227,21 @@ def _build_segmentation_diagnostics(segment_table: pd.DataFrame) -> pd.DataFrame
     return pd.DataFrame(rows)
 
 
+def _cluster_representative_keyword_map(segment_table: pd.DataFrame, noise_label: int) -> dict[int, str]:
+    if segment_table.empty or 'cluster_id' not in segment_table.columns:
+        return {}
+    clustered = segment_table.loc[segment_table['cluster_id'].ne(int(noise_label))].copy()
+    if clustered.empty:
+        return {}
+    clustered['keyword'] = clustered['keyword'].astype(str)
+    clustered['keyword_len'] = clustered['keyword'].str.len()
+    reps = (
+        clustered.sort_values(['cluster_id', 'monetary', 'frequency', 'keyword_len', 'keyword'], ascending=[True, False, False, False, True])
+        .groupby('cluster_id', as_index=False)
+        .first()[['cluster_id', 'keyword']]
+    )
+    return {int(row.cluster_id): str(row.keyword) for row in reps.itertuples(index=False)}
+
 
 def _build_cluster_diagnostics(segment_table: pd.DataFrame, noise_label: int) -> pd.DataFrame:
     clustered = segment_table.loc[segment_table['cluster_id'] != noise_label].copy()
@@ -235,19 +252,32 @@ def _build_cluster_diagnostics(segment_table: pd.DataFrame, noise_label: int) ->
             'noise_share': 1.0,
             'mean_cluster_size': 0.0,
             'max_cluster_size': 0,
-            'cluster_status': 'disabled_or_all_noise',
         }])
+
     cluster_sizes = clustered.groupby('cluster_id')['keyword'].nunique()
-    noise_share = float((segment_table['cluster_id'] == noise_label).mean())
-    return pd.DataFrame([{
+    rep_map = _cluster_representative_keyword_map(segment_table, noise_label)
+    rows = [{
         'n_clusters': int(cluster_sizes.shape[0]),
         'noise_keywords': int((segment_table['cluster_id'] == noise_label).sum()),
-        'noise_share': noise_share,
+        'noise_share': float((segment_table['cluster_id'] == noise_label).mean()),
         'mean_cluster_size': float(cluster_sizes.mean()),
         'max_cluster_size': int(cluster_sizes.max()),
-        'cluster_status': 'ok' if noise_share < 1.0 else 'disabled_or_all_noise',
-    }])
-
+    }]
+    detail_rows = []
+    for cluster_id, cluster_df in clustered.groupby('cluster_id', dropna=False):
+        detail_rows.append({
+            'cluster_id': int(cluster_id),
+            'segment': cluster_df['segment'].iloc[0] if 'segment' in cluster_df.columns and len(cluster_df) else None,
+            'n_keywords': int(cluster_df['keyword'].nunique()),
+            'cluster_size': int(cluster_df['cluster_size'].max()) if 'cluster_size' in cluster_df.columns else int(cluster_df['keyword'].nunique()),
+            'total_monetary': float(cluster_df['monetary'].sum()) if 'monetary' in cluster_df.columns else float('nan'),
+            'representative_keyword': rep_map.get(int(cluster_id), ''),
+        })
+    summary_df = pd.DataFrame(rows)
+    detail_df = pd.DataFrame(detail_rows)
+    if detail_df.empty:
+        return summary_df
+    return pd.concat([summary_df, detail_df], ignore_index=True, sort=False)
 
 
 def _build_pooling_diagnostics(predictions_all: pd.DataFrame) -> pd.DataFrame:
@@ -265,12 +295,15 @@ def _build_pooling_diagnostics(predictions_all: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-
 def _build_hierarchy_diagnostics(hierarchy_rows: list[dict[str, Any]]) -> pd.DataFrame:
     if not hierarchy_rows:
         return pd.DataFrame()
     return pd.DataFrame(hierarchy_rows)
 
+
+def _metric_series_from_group(df: pd.DataFrame) -> pd.Series:
+    metrics = evaluate_predictions(df['click'].to_numpy(), df['predicted'].to_numpy())
+    return pd.Series(metrics)
 
 
 def _build_keyword_level(predictions: dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -285,22 +318,28 @@ def _build_keyword_level(predictions: dict[str, pd.DataFrame]) -> pd.DataFrame:
             pred_click=('pred_click', 'sum'),
             spend=('spend', 'sum'),
             n_rows=('keyword', 'size'),
-            mean_keyword_train_count=('test_keyword_train_count', 'mean'),
+            mean_keyword_train_row_count=('test_keyword_train_row_count', 'first'),
             clustered=('is_clustered', 'max'),
+            posterior_source=('posterior_source', lambda s: s.mode().iat[0] if not s.mode().empty else s.iloc[0]),
         ).reset_index()
         grouped['abs_error'] = (grouped['actual_click'] - grouped['pred_click']).abs()
         rows.append(grouped)
     return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
 
 
-
-def _build_cluster_level(predictions: dict[str, pd.DataFrame], noise_label: int) -> pd.DataFrame:
+def _build_cluster_level(predictions: dict[str, pd.DataFrame], segment_table: pd.DataFrame, noise_label: int) -> pd.DataFrame:
     if not predictions:
         return pd.DataFrame()
+    rep_map = _cluster_representative_keyword_map(segment_table, noise_label)
     rows = []
     for _, pred_df in predictions.items():
         if pred_df.empty:
             continue
+        metric_df = (
+            pred_df.groupby(['run_name', 'segment', 'cluster_id'], dropna=False)
+            .apply(_metric_series_from_group)
+            .reset_index()
+        )
         grouped = pred_df.groupby(['run_name', 'segment', 'cluster_id'], dropna=False).agg(
             actual_click=('click', 'sum'),
             pred_click=('pred_click', 'sum'),
@@ -311,9 +350,54 @@ def _build_cluster_level(predictions: dict[str, pd.DataFrame], noise_label: int)
         ).reset_index()
         grouped['is_noise_cluster'] = grouped['cluster_id'].eq(int(noise_label))
         grouped['abs_error'] = (grouped['actual_click'] - grouped['pred_click']).abs()
+        grouped['representative_keyword'] = grouped['cluster_id'].map(lambda x: rep_map.get(int(x), '') if pd.notna(x) else '')
+        grouped = grouped.merge(metric_df, on=['run_name', 'segment', 'cluster_id'], how='left')
         rows.append(grouped)
     return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
 
+
+def _build_posterior_source_level(predictions: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    if not predictions:
+        return pd.DataFrame()
+    rows = []
+    for _, pred_df in predictions.items():
+        if pred_df.empty:
+            continue
+        metric_df = (
+            pred_df.groupby(['run_name', 'segment', 'posterior_source'], dropna=False)
+            .apply(_metric_series_from_group)
+            .reset_index()
+        )
+        grouped = pred_df.groupby(['run_name', 'segment', 'posterior_source'], dropna=False).agg(
+            n_rows=('keyword', 'size'),
+            n_keywords=('keyword', 'nunique'),
+            actual_click=('click', 'sum'),
+            pred_click=('pred_click', 'sum'),
+        ).reset_index()
+        grouped['abs_error'] = (grouped['actual_click'] - grouped['pred_click']).abs()
+        grouped = grouped.merge(metric_df, on=['run_name', 'segment', 'posterior_source'], how='left')
+        rows.append(grouped)
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
+
+def _build_overall_run_level(predictions: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    if not predictions:
+        return pd.DataFrame()
+    rows = []
+    for run_name, pred_df in predictions.items():
+        if pred_df.empty:
+            continue
+        metrics = evaluate_predictions(pred_df['click'].to_numpy(), pred_df['predicted'].to_numpy())
+        rows.append({
+            'run_name': run_name,
+            'segment': 'overall',
+            'n_rows': int(len(pred_df)),
+            'n_keywords': int(pred_df['keyword'].nunique()),
+            'actual_click': float(pred_df['click'].sum()),
+            'pred_click': float(pred_df['predicted'].sum()),
+            **metrics,
+        })
+    return pd.DataFrame(rows)
 
 
 def _concat_named_frames(frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -323,7 +407,6 @@ def _concat_named_frames(frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
     if not ordered:
         return pd.DataFrame()
     return pd.concat(ordered, ignore_index=True)
-
 
 
 def run_backtest_suite(raw_df: pd.DataFrame, config: BacktestConfig) -> dict:
@@ -339,6 +422,11 @@ def run_backtest_suite(raw_df: pd.DataFrame, config: BacktestConfig) -> dict:
         segment_table=segment_table,
         noise_label=int(config.semantic.cluster_noise_label),
     )
+    cluster_rep_map = _cluster_representative_keyword_map(segment_table, int(config.semantic.cluster_noise_label))
+    if cluster_rep_map:
+        segment_table['cluster_representative_keyword'] = segment_table['cluster_id'].map(lambda x: cluster_rep_map.get(int(x), '') if pd.notna(x) and int(x) != int(config.semantic.cluster_noise_label) else '')
+    else:
+        segment_table['cluster_representative_keyword'] = ''
     semantic_diags = segment_table.attrs.get('semantic_diagnostics', pd.DataFrame())
     diagnostics: dict[str, pd.DataFrame] = {
         'segmentation': _build_segmentation_diagnostics(segment_table),
@@ -375,6 +463,7 @@ def run_backtest_suite(raw_df: pd.DataFrame, config: BacktestConfig) -> dict:
                 )
                 pred_df['segment'] = segment
                 pred_df['run_name'] = run_name
+                pred_df['cluster_representative_keyword'] = pred_df['cluster_id'].map(lambda x: cluster_rep_map.get(int(x), '') if pd.notna(x) and int(x) != int(config.semantic.cluster_noise_label) else '')
                 summary_rows.append({
                     'run_name': run_name,
                     'segment': segment,
@@ -390,8 +479,10 @@ def run_backtest_suite(raw_df: pd.DataFrame, config: BacktestConfig) -> dict:
                 metrics_map[run_name] = pd.DataFrame([metric_dict])
 
     summary = pd.DataFrame(summary_rows)
+    overall_run_level = _build_overall_run_level(predictions)
     if len(summary) > 0:
-        summary = summary.sort_values(['rmse', 'mae']).reset_index(drop=True)
+        summary = pd.concat([summary, overall_run_level], ignore_index=True, sort=False)
+        summary = summary.sort_values(['run_name', 'segment']).reset_index(drop=True)
 
     train_df = normalize_cluster_columns(
         train_aggregated,
@@ -407,7 +498,8 @@ def run_backtest_suite(raw_df: pd.DataFrame, config: BacktestConfig) -> dict:
     diagnostics['pooling'] = _build_pooling_diagnostics(predictions_all)
     diagnostics['hierarchy'] = _build_hierarchy_diagnostics(hierarchy_rows)
     keyword_level = _build_keyword_level(predictions)
-    cluster_level = _build_cluster_level(predictions, int(config.semantic.cluster_noise_label))
+    cluster_level = _build_cluster_level(predictions, segment_table, int(config.semantic.cluster_noise_label))
+    posterior_source_level = _build_posterior_source_level(predictions)
 
     return {
         'summary': summary,
@@ -420,6 +512,7 @@ def run_backtest_suite(raw_df: pd.DataFrame, config: BacktestConfig) -> dict:
         'test_aggregated': test_aggregated,
         'keyword_level': keyword_level,
         'cluster_level': cluster_level,
+        'posterior_source_level': posterior_source_level,
         'diagnostics': diagnostics,
         'config_snapshot': _as_config_snapshot(config),
     }

@@ -74,6 +74,7 @@ def save_backtest_suite(result: dict[str, Any], output_dir: str) -> None:
     predictions_all = _pick_frame(result, 'predictions_all')
     keyword_level = _pick_frame(result, 'keyword_level')
     cluster_level = _pick_frame(result, 'cluster_level')
+    posterior_source_level = _pick_frame(result, 'posterior_source_level')
 
     _save_csv(summary, output_path / 'summary.csv')
     _save_csv(segment_table, output_path / 'segment_table.csv')
@@ -84,6 +85,7 @@ def save_backtest_suite(result: dict[str, Any], output_dir: str) -> None:
     _save_csv(predictions_all, output_path / 'predictions_all.csv')
     _save_csv(keyword_level, output_path / 'keyword_level.csv')
     _save_csv(cluster_level, output_path / 'cluster_level.csv')
+    _save_csv(posterior_source_level, output_path / 'posterior_source_level.csv')
 
     if predictions_all is not None and not predictions_all.empty:
         _save_csv(predictions_all, predictions_dir / 'predictions_all.csv')
@@ -123,6 +125,8 @@ def save_backtest_suite(result: dict[str, Any], output_dir: str) -> None:
             keyword_level.to_excel(writer, sheet_name='keyword_level', index=False)
         if cluster_level is not None and not cluster_level.empty:
             cluster_level.to_excel(writer, sheet_name='cluster_level', index=False)
+        if posterior_source_level is not None and not posterior_source_level.empty:
+            posterior_source_level.to_excel(writer, sheet_name='posterior_source', index=False)
 
         for diag_name, sheet_name in DIAGNOSTIC_SHEETS.items():
             diag_df = diagnostics.get(diag_name)

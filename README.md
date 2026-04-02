@@ -2,7 +2,7 @@
 
 Config-driven hierarchical Bayesian search-ads modeling project.
 
-## What is in this stable refactor (v15)
+## What is in this stable refactor (v16)
 
 - Package-style imports across `src/*`
 - Conservative semantic clustering defaults for VM stability
@@ -63,3 +63,9 @@ from src.api import BacktestConfig, DataConfig, SplitConfig, run_backtest_suite
 ## Notes
 
 For short histories such as ~2 months, keep `aggregation_level='daily'` as the default baseline.
+
+
+## v16 stability fixes
+
+- Fixed a bug where unseen test keywords were dropped during segment frame preparation before fallback logic could run. Unseen test keywords now default to the `long_tail` segment for evaluation and fallback.
+- Renamed hierarchy support counters for clarity: `keyword_train_count` -> `keyword_train_row_count`, `test_keyword_train_count` -> `test_keyword_train_row_count`.
