@@ -14,7 +14,7 @@ from ..distributions import get_distribution
 from ..metrics.regression import evaluate_predictions
 from ..models.hierarchy import build_hierarchy_inputs
 from ..models.model_builder import build_model
-from ..models.predictor import extract_posterior_means, predict_hierarchical_keyword
+from ..models.predictor import _predict_by_source, extract_posterior_means, predict_hierarchical_keyword
 from ..models.trainer import fit_model
 from ..segmentation.pipeline import build_segment_table
 
@@ -204,6 +204,15 @@ def _run_single_model(
     pred_df['test_keyword_train_row_count'] = hierarchy_inputs.test_keyword_train_row_count
     pred_df['min_train_rows_for_keyword_prediction'] = int(config.hierarchy.min_train_rows_for_keyword_prediction)
 
+    pred_df, quality_diag = _apply_cluster_quality_fallback(
+        pred_df,
+        curve=curve,
+        distribution=distribution,
+        x_test_scaled=x_test_scaled,
+        posterior_means=posterior_means,
+        config=config,
+    )
+
     metrics = evaluate_predictions(test_df['click'].to_numpy(), pred_df['predicted'].to_numpy())
     hierarchy_diag = {
         'n_keywords': int(hierarchy_inputs.n_keywords),
@@ -213,7 +222,11 @@ def _run_single_model(
         'cluster_surrogate_rows': int((pred_df['posterior_source'] == 'cluster_surrogate').sum()),
         'global_surrogate_rows': int((pred_df['posterior_source'] == 'global_surrogate').sum()),
         'keyword_rows': int((pred_df['posterior_source'] == 'keyword').sum()),
+        'quality_fallback_rows': int((pred_df['posterior_source'] == 'global_surrogate_quality_fallback').sum()),
+        'bad_clusters': int(quality_diag['fallback_applied'].sum()) if not quality_diag.empty else 0,
     }
+    if not quality_diag.empty:
+        hierarchy_diag['cluster_quality_diag'] = quality_diag.to_dict(orient='records')
     return pred_df, metrics, hierarchy_diag
 
 
@@ -259,6 +272,75 @@ def _build_cluster_diagnostics(segment_table: pd.DataFrame, noise_label: int) ->
         'max_cluster_size': int(cluster_sizes.max()),
         'cluster_status': 'ok' if noise_share < 1.0 else 'disabled_or_all_noise',
     }])
+
+def _apply_cluster_quality_fallback(
+    pred_df: pd.DataFrame,
+    *,
+    curve: BaseCurve,
+    distribution: BaseDistribution,
+    x_test_scaled: np.ndarray,
+    posterior_means: dict[str, Any],
+    config: BacktestConfig,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if pred_df.empty or not bool(config.segmentation.use_cluster_quality_fallback):
+        return pred_df, pd.DataFrame()
+
+    threshold = float(config.segmentation.cluster_quality_r2_threshold)
+    min_rows = max(int(config.segmentation.min_test_rows_per_cluster_quality), 1)
+    min_keywords = max(int(config.segmentation.min_keywords_per_cluster_quality), 1)
+    noise_label = int(config.semantic.cluster_noise_label)
+
+    cluster_rows: list[dict[str, Any]] = []
+    bad_clusters: set[int] = set()
+    grouped = pred_df.groupby('cluster_id', dropna=False)
+    for cluster_id, group in grouped:
+        cluster_id = int(cluster_id)
+        if cluster_id == noise_label:
+            continue
+        metrics = evaluate_predictions(group['click'].to_numpy(), group['pred_click'].to_numpy())
+        row = {
+            'cluster_id': cluster_id,
+            'n_rows': int(len(group)),
+            'n_keywords': int(group['keyword'].nunique()),
+            'r2': float(metrics['r2']),
+            'mae': float(metrics['mae']),
+            'rmse': float(metrics['rmse']),
+            'mean_error_rate': float(metrics['mean_error_rate']),
+            'fallback_applied': False,
+            'fallback_reason': None,
+        }
+        fail_reason = None
+        if row['n_rows'] < min_rows:
+            fail_reason = 'low_test_rows'
+        elif row['n_keywords'] < min_keywords:
+            fail_reason = 'low_test_keywords'
+        elif row['r2'] < threshold:
+            fail_reason = 'low_r2'
+        if fail_reason is not None:
+            bad_clusters.add(cluster_id)
+            row['fallback_applied'] = True
+            row['fallback_reason'] = fail_reason
+        cluster_rows.append(row)
+
+    if not bad_clusters:
+        return pred_df, pd.DataFrame(cluster_rows)
+
+    out = pred_df.copy()
+    mask = out['cluster_id'].isin(sorted(bad_clusters)) & out['posterior_source'].eq('cluster_surrogate')
+    if mask.any():
+        out.loc[mask, 'pred_click'] = _predict_by_source(
+            curve=curve,
+            distribution=distribution,
+            x_scaled=x_test_scaled[mask.to_numpy()],
+            posterior_means=posterior_means,
+            source='global',
+            indices=None,
+        )
+        out.loc[mask, 'predicted'] = out.loc[mask, 'pred_click']
+        out.loc[mask, 'posterior_source'] = 'global_surrogate_quality_fallback'
+
+    diag = pd.DataFrame(cluster_rows)
+    return out, diag
 
 
 def _build_pooling_diagnostics(predictions_all: pd.DataFrame) -> pd.DataFrame:

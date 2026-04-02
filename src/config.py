@@ -52,6 +52,10 @@ class SegmentationConfig:
     min_train_rows_per_routing_group: int = 30
     use_routing_fallback: bool = True
     fallback_routing_key_suffix: str = 'all'
+    use_cluster_quality_fallback: bool = True
+    cluster_quality_r2_threshold: float = 0.0
+    min_test_rows_per_cluster_quality: int = 20
+    min_keywords_per_cluster_quality: int = 5
 
 
 @dataclass(slots=True)
