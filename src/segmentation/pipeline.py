@@ -56,12 +56,14 @@ def _compute_cluster_representatives(cluster_df: pd.DataFrame, reduced_embedding
 def _cluster_one_group(target_df: pd.DataFrame, config: BacktestConfig) -> tuple[pd.DataFrame, dict]:
     noise_label = int(config.semantic.cluster_noise_label)
     segment_name = str(target_df['segment'].iloc[0]) if not target_df.empty and 'segment' in target_df.columns else 'unknown'
-    routing_key = str(target_df['routing_key'].iloc[0]) if not target_df.empty and 'routing_key' in target_df.columns else f'{segment_name}__unknown__general'
+    routing_key = str(target_df['routing_key'].iloc[0]) if not target_df.empty and 'routing_key' in target_df.columns else f'{segment_name}__unknown'
     keywords = target_df['keyword'].astype(str).dropna().drop_duplicates().tolist() if not target_df.empty else []
+    total_train_rows = int(target_df['train_row_count'].sum()) if 'train_row_count' in target_df.columns else len(keywords)
     diag = {
         'segment': segment_name,
         'routing_key': routing_key,
         'n_keywords': len(keywords),
+        'train_rows': total_train_rows,
         'embedding_dim': 0,
         'reduced_dim': 0,
         'n_clusters': 0,
@@ -74,9 +76,10 @@ def _cluster_one_group(target_df: pd.DataFrame, config: BacktestConfig) -> tuple
         return _empty_cluster_frame(noise_label), diag
 
     min_group = max(2, int(config.segmentation.min_keywords_per_routing_group))
+    min_rows_group = max(1, int(config.segmentation.min_train_rows_per_routing_group))
     min_cluster_size = max(2, int(config.semantic.min_cluster_size))
-    if len(keywords) < max(min_group, min_cluster_size):
-        diag['status'] = 'skipped_too_few_keywords'
+    if len(keywords) < max(min_group, min_cluster_size) or total_train_rows < min_rows_group:
+        diag['status'] = 'skipped_too_few_keywords_or_rows'
         return pd.DataFrame(
             {
                 'keyword': keywords,
@@ -127,9 +130,56 @@ def _cluster_one_group(target_df: pd.DataFrame, config: BacktestConfig) -> tuple
     return cluster_df, diag
 
 
+def _assign_routing(segment_df: pd.DataFrame, segment_name: str, config: BacktestConfig) -> pd.DataFrame:
+    routing_mode = getattr(config.segmentation, 'routing_mode', 'topic')
+    routing_frame = build_topic_intent_frame(segment_df['keyword'].tolist(), segment=segment_name, routing_mode=routing_mode)
+    if routing_frame.empty:
+        out = segment_df.copy()
+        out['topic'] = 'unknown'
+        out['intent'] = 'general'
+        out['routing_key'] = f'{segment_name}__all'
+        return out
+
+    route_map = routing_frame.set_index('keyword')
+    out = segment_df.copy()
+    for col in ['topic', 'intent', 'routing_key']:
+        out[col] = out['keyword'].map(route_map[col]).fillna(out[col] if col in out.columns else None)
+
+    if bool(config.segmentation.use_routing_fallback):
+        keyword_min = max(1, int(config.segmentation.min_keywords_per_routing_group))
+        row_min = max(1, int(config.segmentation.min_train_rows_per_routing_group))
+        grp_stats = out.groupby('routing_key', dropna=False).agg(
+            n_keywords=('keyword', 'nunique'),
+            train_rows=('train_row_count', 'sum'),
+            topic=('topic', 'first'),
+        )
+        small_keys = grp_stats.index[(grp_stats['n_keywords'] < keyword_min) | (grp_stats['train_rows'] < row_min)]
+        if len(small_keys) > 0:
+            topic_row = out['segment'].astype(str) + '__' + out['topic'].astype(str)
+            topic_stats = out.assign(topic_routing_key=topic_row).groupby('topic_routing_key', dropna=False).agg(
+                n_keywords=('keyword', 'nunique'),
+                train_rows=('train_row_count', 'sum'),
+            )
+            fallback_key = f"{segment_name}__{config.segmentation.fallback_routing_key_suffix}"
+            for key in small_keys.tolist():
+                mask = out['routing_key'].eq(key)
+                if not mask.any():
+                    continue
+                candidate = str(topic_row.loc[mask].iloc[0])
+                if candidate in topic_stats.index and topic_stats.loc[candidate, 'n_keywords'] >= keyword_min and topic_stats.loc[candidate, 'train_rows'] >= row_min:
+                    out.loc[mask, 'routing_key'] = candidate
+                else:
+                    out.loc[mask, 'routing_key'] = fallback_key
+    return out
+
+
 def build_segment_table(train_df: pd.DataFrame, config: BacktestConfig) -> pd.DataFrame:
     rfm = build_rfm_table(train_df, config.segmentation)
     segment_table = apply_rfm_head_tail(rfm, config.segmentation)
+    # explicit row count to support low-row fallback and diagnostics
+    row_counts = train_df.groupby('keyword').size().rename('train_row_count')
+    segment_table = segment_table.merge(row_counts, on='keyword', how='left')
+    segment_table['train_row_count'] = segment_table['train_row_count'].fillna(0).astype(int)
     segment_table['topic'] = 'unknown'
     segment_table['intent'] = 'general'
     segment_table['routing_key'] = segment_table['segment'].astype(str) + '__default'
@@ -147,11 +197,9 @@ def build_segment_table(train_df: pd.DataFrame, config: BacktestConfig) -> pd.Da
     if bool(config.segmentation.use_topic_intent_routing):
         for segment_name in semantic_segments:
             mask = segment_table['segment'].eq(segment_name)
-            routing_frame = build_topic_intent_frame(segment_table.loc[mask, 'keyword'].tolist(), segment=segment_name)
-            if len(routing_frame) > 0:
-                route_map = routing_frame.set_index('keyword')
-                for col in ['topic', 'intent', 'routing_key']:
-                    segment_table.loc[mask, col] = segment_table.loc[mask, 'keyword'].map(route_map[col])
+            assigned = _assign_routing(segment_table.loc[mask, ['keyword', 'segment', 'topic', 'intent', 'routing_key', 'train_row_count']].copy(), segment_name, config)
+            for col in ['topic', 'intent', 'routing_key']:
+                segment_table.loc[mask, col] = assigned.set_index('keyword')[col].reindex(segment_table.loc[mask, 'keyword']).to_numpy()
 
     if config.segmentation.use_semantic_clustering:
         cluster_frames: list[pd.DataFrame] = []
@@ -159,7 +207,7 @@ def build_segment_table(train_df: pd.DataFrame, config: BacktestConfig) -> pd.Da
 
         for segment_name in semantic_segments:
             mask = segment_table['segment'].eq(segment_name)
-            target = segment_table.loc[mask, ['keyword', 'segment', 'topic', 'intent', 'routing_key']].copy()
+            target = segment_table.loc[mask, ['keyword', 'segment', 'topic', 'intent', 'routing_key', 'train_row_count']].copy()
             if not bool(config.segmentation.use_topic_intent_routing):
                 target['routing_key'] = f'{segment_name}__all'
                 target['topic'] = 'unknown'
@@ -167,7 +215,7 @@ def build_segment_table(train_df: pd.DataFrame, config: BacktestConfig) -> pd.Da
                 segment_table.loc[mask, 'routing_key'] = target.set_index('keyword')['routing_key'].reindex(segment_table.loc[mask, 'keyword']).to_numpy()
 
             for _, route_group in target.groupby('routing_key', dropna=False):
-                cluster_df, diag = _cluster_one_group(route_group[['keyword', 'segment', 'routing_key']], config)
+                cluster_df, diag = _cluster_one_group(route_group[['keyword', 'segment', 'routing_key', 'train_row_count']], config)
                 semantic_diags.append(diag)
                 if cluster_df.empty:
                     continue

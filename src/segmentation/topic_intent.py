@@ -57,7 +57,7 @@ def infer_topic(keyword: str) -> str:
     return cleaned[:4].lower() if len(cleaned) >= 4 else cleaned.lower()
 
 
-def build_topic_intent_frame(keywords: Iterable[str], *, segment: str | None = None) -> pd.DataFrame:
+def build_topic_intent_frame(keywords: Iterable[str], *, segment: str | None = None, routing_mode: str = 'topic_intent') -> pd.DataFrame:
     series = pd.Series(list(keywords), dtype='object').dropna().astype(str).str.strip()
     if series.empty:
         return pd.DataFrame(columns=['keyword', 'topic', 'intent', 'routing_key'])
@@ -66,5 +66,8 @@ def build_topic_intent_frame(keywords: Iterable[str], *, segment: str | None = N
     out['topic'] = out['keyword'].map(infer_topic)
     out['intent'] = out['keyword'].map(infer_intent)
     prefix = f"{segment}__" if segment else ''
-    out['routing_key'] = prefix + out['topic'].astype(str) + '__' + out['intent'].astype(str)
+    if str(routing_mode) == 'topic':
+        out['routing_key'] = prefix + out['topic'].astype(str)
+    else:
+        out['routing_key'] = prefix + out['topic'].astype(str) + '__' + out['intent'].astype(str)
     return out

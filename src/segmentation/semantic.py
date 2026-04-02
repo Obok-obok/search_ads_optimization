@@ -57,29 +57,35 @@ def reduce_embedding_dimensions(embeddings: np.ndarray, config: SemanticClusteri
         return np.asarray(embeddings, dtype=np.float32)
 
     n_samples, n_features = embeddings.shape
-    if n_samples < 3:
+    # tiny groups are safer without UMAP
+    if n_samples <= 4:
         return np.asarray(embeddings, dtype=np.float32)
 
-    target_components = min(config.umap_n_components, max(2, n_features), n_samples - 1)
-    if target_components >= n_features:
+    target_components = min(config.umap_n_components, max(1, n_features), max(1, n_samples - 2))
+    if target_components < 1 or target_components >= n_features or target_components >= n_samples:
         return np.asarray(embeddings, dtype=np.float32)
+
+    safe_n_neighbors = min(config.umap_n_neighbors, max(2, n_samples - 1))
 
     try:
         import umap
     except ImportError:
-        # graceful fallback for constrained environments
         return np.asarray(embeddings, dtype=np.float32)
 
-    reducer = umap.UMAP(
-        n_neighbors=min(config.umap_n_neighbors, max(2, n_samples - 1)),
-        n_components=target_components,
-        metric=config.umap_metric,
-        min_dist=config.umap_min_dist,
-        random_state=config.random_state,
-        low_memory=config.umap_low_memory,
-    )
-    reduced = reducer.fit_transform(embeddings)
-    return np.asarray(reduced, dtype=np.float32)
+    try:
+        reducer = umap.UMAP(
+            n_neighbors=safe_n_neighbors,
+            n_components=target_components,
+            metric=config.umap_metric,
+            min_dist=config.umap_min_dist,
+            random_state=config.random_state,
+            low_memory=config.umap_low_memory,
+        )
+        reduced = reducer.fit_transform(embeddings)
+        return np.asarray(reduced, dtype=np.float32)
+    except Exception:
+        # graceful fallback for very small / numerically unstable groups
+        return np.asarray(embeddings, dtype=np.float32)
 
 
 
